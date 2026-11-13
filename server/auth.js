@@ -1,66 +1,547 @@
-import { randomBytes,randomUUID,scryptSync,timingSafeEqual,createHash } from 'node:crypto'
-import { accessTags,defaultProfiles } from '../shared/access-rules.js'
-const fail=(status,message)=>{throw Object.assign(new Error(message),{status})}
-const hash=value=>createHash('sha256').update(value).digest('hex')
-const passwordHash=value=>{const salt=randomBytes(16).toString('hex');return salt+':'+scryptSync(value,salt,64).toString('hex')}
-const matches=(value,stored)=>{const [salt,key]=stored.split(':');return timingSafeEqual(scryptSync(value,salt,64),Buffer.from(key,'hex'))}
-const now=()=>new Date().toISOString()
-export function migrateAuth(db){db.exec(`CREATE TABLE IF NOT EXISTS services(id TEXT PRIMARY KEY,name TEXT NOT NULL,details TEXT NOT NULL DEFAULT '{}');
+import {
+  randomBytes,
+  randomUUID,
+  scryptSync,
+  timingSafeEqual,
+  createHash,
+} from "node:crypto";
+import { accessTags, defaultProfiles } from "../shared/access-rules.js";
+const fail = (status, message) => {
+  throw Object.assign(new Error(message), { status });
+};
+const hash = (value) => createHash("sha256").update(value).digest("hex");
+const passwordHash = (value) => {
+  const salt = randomBytes(16).toString("hex");
+  return salt + ":" + scryptSync(value, salt, 64).toString("hex");
+};
+const matches = (value, stored) => {
+  const [salt, key] = stored.split(":");
+  return timingSafeEqual(scryptSync(value, salt, 64), Buffer.from(key, "hex"));
+};
+const now = () => new Date().toISOString();
+export function migrateAuth(db) {
+  db.exec(`CREATE TABLE IF NOT EXISTS services(id TEXT PRIMARY KEY,name TEXT NOT NULL,details TEXT NOT NULL DEFAULT '{}');
  CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,username TEXT NOT NULL COLLATE NOCASE UNIQUE,name TEXT NOT NULL,password_hash TEXT NOT NULL,created_at TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS service_memberships(user_id TEXT NOT NULL REFERENCES users(id),service_id TEXT NOT NULL REFERENCES services(id),tags TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1,PRIMARY KEY(user_id,service_id));
  CREATE TABLE IF NOT EXISTS user_sessions(token_hash TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),service_id TEXT NOT NULL REFERENCES services(id),expires_at INTEGER NOT NULL);
  CREATE TABLE IF NOT EXISTS identity_audit(id INTEGER PRIMARY KEY,service_id TEXT,actor_id TEXT,actor TEXT NOT NULL,action TEXT NOT NULL,details TEXT NOT NULL,created_at TEXT NOT NULL);
- CREATE TABLE IF NOT EXISTS login_attempts(key TEXT PRIMARY KEY,failures INTEGER NOT NULL,until_ms INTEGER NOT NULL);`)}
-export function sessionContext(db,req){const token=(req.headers.cookie||'').split(';').map(s=>s.trim()).find(s=>s.startsWith('emcore_session='))?.slice(15);if(!token||!/^[a-f0-9]{64}$/.test(token))fail(401,'Sign in to continue');const row=db.prepare(`SELECT u.id,u.username,u.name,m.tags,s.service_id serviceId,s.expires_at,services.name serviceName FROM user_sessions s JOIN users u ON u.id=s.user_id JOIN service_memberships m ON m.user_id=u.id AND m.service_id=s.service_id JOIN services ON services.id=s.service_id WHERE s.token_hash=? AND m.active=1`).get(hash(token));if(!row||row.expires_at<=Date.now())fail(401,'Your session has expired. Sign in again.');return {...row,tags:JSON.parse(row.tags),tokenHash:hash(token),actor:row.name+' (@'+row.username+')'}}
-const admin=user=>{if(!user?.tags.includes('Service Admin')||user.tags.includes('Read Only'))fail(403,'Service Admin access is required')}
-const cleanUser=row=>({id:row.id,username:row.username,name:row.name,tags:JSON.parse(row.tags),active:Boolean(row.active)})
-const audit=(db,user,action,details,serviceId=user?.serviceId)=>db.prepare('INSERT INTO identity_audit(service_id,actor_id,actor,action,details,created_at) VALUES(?,?,?,?,?,?)').run(serviceId||null,user?.id||null,user?.actor||'Initial setup',action,JSON.stringify(details),now())
-const validPassword=p=>{if(typeof p!=='string'||p.length<12||p.length>128)fail(400,'Use a password between 12 and 128 characters')}
-const validTags=tags=>{if(!Array.isArray(tags)||!tags.length||new Set(tags).size!==tags.length||tags.some(tag=>!accessTags.some(t=>t.id===tag)))fail(400,'Choose valid role and permission tags')}
-function serviceFields(body){const result={};for(const key of ['name','deaRegistrant','deaNumber','deaExpiresOn','deaSchedules','address','contactName','contactEmail','contactPhone','notes']){const value=body[key]??'';if(typeof value!=='string'||value.length>(key==='notes'?2000:500))fail(400,'Invalid service '+key);result[key]=value.trim()}if(!result.name)fail(400,'Service name is required');result.deaNumber=result.deaNumber.toUpperCase();if(result.deaNumber&&!/^[A-Z]{2}\d{7}$/.test(result.deaNumber))fail(400,'DEA registration number must have two letters and seven digits');if(result.deaExpiresOn&&(!/^\d{4}-\d{2}-\d{2}$/.test(result.deaExpiresOn)||!Number.isFinite(Date.parse(result.deaExpiresOn))||new Date(result.deaExpiresOn).toISOString().slice(0,10)!==result.deaExpiresOn))fail(400,'Enter a valid DEA expiration date');return result}
-function userFields(body){if(typeof body.username!=='string'||!/^[a-zA-Z0-9._@+-]{3,80}$/.test(body.username)||typeof body.name!=='string'||!body.name.trim()||body.name.length>100)fail(400,'Enter a name and username (3–80 letters, numbers, . _ @ + or -)');validTags(body.tags);return {username:body.username.toLowerCase(),name:body.name.trim()}}
-export async function authRoute(db,req,res,url,readBody){
- const path=url.pathname;
- if(!path.startsWith('/api/auth/')&&!['/api/users','/api/services'].includes(path))return false
- const send=(status,data)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(data));return true}
- const issue=(id,serviceId)=>{db.prepare('DELETE FROM user_sessions WHERE expires_at<=?').run(Date.now());const token=randomBytes(32).toString('hex');db.prepare('INSERT INTO user_sessions VALUES(?,?,?,?)').run(hash(token),id,serviceId,Date.now()+8*3600000);res.setHeader('Set-Cookie',`emcore_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800${req.socket.encrypted||process.env.EMCORE_SECURE_COOKIE==='1'?'; Secure':''}`)}
- if(req.method==='GET'&&path==='/api/auth/status'){let user=null;try{user=sessionContext(db,req)}catch{}return send(200,{setupRequired:!db.prepare('SELECT 1 FROM users LIMIT 1').get(),user:user?{id:user.id,name:user.name,username:user.username,serviceId:user.serviceId,serviceName:user.serviceName,tags:user.tags}:null})}
- if(req.method==='POST'&&path==='/api/auth/setup'){
- const body=await readBody();if(db.prepare('SELECT 1 FROM users LIMIT 1').get())fail(409,'Initial setup is already complete');const fields=userFields({...body,tags:['User','Service Admin']}),service=serviceFields({name:body.serviceName});validPassword(body.password);const userId=randomUUID();db.exec('BEGIN IMMEDIATE');try{if(db.prepare('SELECT 1 FROM users LIMIT 1').get())fail(409,'Initial setup is already complete');db.prepare('INSERT INTO services VALUES(?,?,?)').run('primary',service.name,JSON.stringify(service));db.prepare('INSERT INTO users VALUES(?,?,?,?,?)').run(userId,fields.username,fields.name,passwordHash(body.password),now());db.prepare('INSERT INTO service_memberships VALUES(?,?,?,1)').run(userId,'primary',JSON.stringify(defaultProfiles[0].tags));audit(db,{id:userId,actor:fields.name+' (@'+fields.username+')',serviceId:'primary'},'Initial administrator created',{username:fields.username});db.exec('COMMIT')}catch(e){db.exec('ROLLBACK');throw e}issue(userId,'primary');return send(200,{ok:true})}
- if(req.method==='POST'&&path==='/api/auth/login'){
- const body=await readBody();const username=typeof body.username==='string'?body.username.toLowerCase().slice(0,80):'',key=hash((req.socket.remoteAddress||'')+':'+username),attempt=db.prepare('SELECT * FROM login_attempts WHERE key=?').get(key);if(attempt&&attempt.until_ms>Date.now()&&attempt.failures>=5)fail(429,'Too many attempts. Try again in 15 minutes.');const user=db.prepare('SELECT * FROM users WHERE username=? COLLATE NOCASE').get(username);const membership=user?db.prepare('SELECT * FROM service_memberships WHERE user_id=? AND active=1 ORDER BY service_id').get(user.id):null;
- const valid=typeof body.password==='string'&&body.password.length<=128&&matches(body.password,user?.password_hash||'00000000000000000000000000000000:'+scryptSync('invalid-password','00000000000000000000000000000000',64).toString('hex'));
- if(!user||!membership||!valid){if(user)for(const m of db.prepare('SELECT service_id FROM service_memberships WHERE user_id=?').all(user.id))audit(db,{id:user.id,actor:'Unauthenticated',serviceId:m.service_id},'Sign-in failed',{username:user.username});db.prepare('DELETE FROM login_attempts WHERE until_ms<?').run(Date.now());db.prepare('INSERT INTO login_attempts VALUES(?,1,?) ON CONFLICT(key) DO UPDATE SET failures=failures+1').run(key,Date.now()+900000);fail(401,'Username or password is incorrect')}
- db.prepare('DELETE FROM login_attempts WHERE key=?').run(key);issue(user.id,membership.service_id);audit(db,{id:user.id,actor:user.name+' (@'+user.username+')',serviceId:membership.service_id},'Signed in',{});return send(200,{ok:true})}
- const user=sessionContext(db,req)
- if(req.method==='POST'&&path==='/api/auth/logout'){db.prepare('DELETE FROM user_sessions WHERE token_hash=?').run(user.tokenHash);audit(db,user,'Signed out',{});res.setHeader('Set-Cookie','emcore_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');return send(200,{ok:true})}
- if(req.method==='POST'&&path==='/api/auth/password'){const body=await readBody();const row=db.prepare('SELECT password_hash FROM users WHERE id=?').get(user.id);if(typeof body.currentPassword!=='string'||body.currentPassword.length>128||!matches(body.currentPassword,row.password_hash))fail(400,'Current password is incorrect');validPassword(body.password);db.prepare('UPDATE users SET password_hash=? WHERE id=?').run(passwordHash(body.password),user.id);db.prepare('DELETE FROM user_sessions WHERE user_id=?').run(user.id);audit(db,user,'Password changed',{});issue(user.id,user.serviceId);return send(200,{ok:true})}
- if(req.method==='POST'&&path==='/api/auth/service'){const body=await readBody();if(!db.prepare('SELECT 1 FROM service_memberships WHERE user_id=? AND service_id=? AND active=1').get(user.id,body.serviceId))fail(403,'You do not belong to that service');db.prepare('UPDATE user_sessions SET service_id=? WHERE token_hash=?').run(body.serviceId,user.tokenHash);audit(db,user,'Service selected',{},body.serviceId);return send(200,{ok:true})}
- if(req.method==='GET'&&path==='/api/services'){const services=db.prepare('SELECT s.id,s.name,s.details,m.tags FROM services s JOIN service_memberships m ON m.service_id=s.id WHERE m.user_id=? AND m.active=1 ORDER BY s.name').all(user.id).map(s=>({id:s.id,name:s.name,...(s.id===user.serviceId&&user.tags.includes('Service Admin')&&!user.tags.includes('Read Only')?JSON.parse(s.details):{})}));return send(200,{services})}
- admin(user)
- if(req.method==='GET'&&path==='/api/users')return send(200,{users:db.prepare('SELECT u.id,u.username,u.name,m.tags,m.active FROM users u JOIN service_memberships m ON m.user_id=u.id WHERE m.service_id=? ORDER BY u.name').all(user.serviceId).map(cleanUser)})
- if(req.method!=='POST')fail(404,'Not found');const body=await readBody();db.exec('BEGIN IMMEDIATE');try{
- if(path==='/api/services'){const service=serviceFields(body),id=body.id||randomUUID();if(body.id&&body.id!==user.serviceId)fail(403,'Select a service before editing it');db.prepare('INSERT INTO services VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,details=excluded.details').run(id,service.name,JSON.stringify(service));if(!body.id)db.prepare('INSERT INTO service_memberships VALUES(?,?,?,1)').run(user.id,id,JSON.stringify(user.tags));audit(db,user,body.id?'Service updated':'Service created',{name:service.name,fields:Object.keys(service).filter(key=>service[key])},id)
- }else if(path==='/api/users'){const fields=userFields(body),id=body.id||randomUUID();if(body.active!==undefined&&typeof body.active!=='boolean')fail(400,'Invalid active status');const active=body.active!==false;const existing=body.id?db.prepare('SELECT * FROM service_memberships WHERE user_id=? AND service_id=?').get(id,user.serviceId):null;if(body.id&&!existing)fail(404,'User not found in this service');if(db.prepare('SELECT 1 FROM users WHERE username=? COLLATE NOCASE AND id<>?').get(fields.username,id))fail(409,'Username already exists');
- if(body.password||!body.id)validPassword(body.password);
- if(existing){const admins=db.prepare('SELECT user_id,tags FROM service_memberships WHERE service_id=? AND active=1').all(user.serviceId).filter(m=>{const tags=JSON.parse(m.tags);return tags.includes('Service Admin')&&!tags.includes('Read Only')});if(admins.some(m=>m.user_id===id)&&admins.length===1&&(!active||!body.tags.includes('Service Admin')||body.tags.includes('Read Only')))fail(400,'Keep at least one active Service Admin');db.prepare('UPDATE users SET username=?,name=? WHERE id=?').run(fields.username,fields.name,id);db.prepare('UPDATE service_memberships SET tags=?,active=? WHERE user_id=? AND service_id=?').run(JSON.stringify(body.tags),Number(active),id,user.serviceId);if(body.password)db.prepare('UPDATE users SET password_hash=? WHERE id=?').run(passwordHash(body.password),id);if(body.password||!active)db.prepare('DELETE FROM user_sessions WHERE user_id=?').run(id)
- }else{db.prepare('INSERT INTO users VALUES(?,?,?,?,?)').run(id,fields.username,fields.name,passwordHash(body.password),now());db.prepare('INSERT INTO service_memberships VALUES(?,?,?,?)').run(id,user.serviceId,JSON.stringify(body.tags),Number(active))}
- audit(db,user,existing?'User updated':'User created',{userId:id,username:fields.username,tags:body.tags,active,passwordReset:Boolean(body.password&&existing)})
- }else fail(404,'Not found');db.exec('COMMIT');return send(200,{ok:true})
- }catch(e){db.exec('ROLLBACK');throw e}
+ CREATE TABLE IF NOT EXISTS login_attempts(key TEXT PRIMARY KEY,failures INTEGER NOT NULL,until_ms INTEGER NOT NULL);`);
+}
+export function sessionContext(db, req) {
+  const token = (req.headers.cookie || "")
+    .split(";")
+    .map((s) => s.trim())
+    .find((s) => s.startsWith("emcore_session="))
+    ?.slice(15);
+  if (!token || !/^[a-f0-9]{64}$/.test(token)) fail(401, "Sign in to continue");
+  const row = db
+    .prepare(
+      `SELECT u.id,u.username,u.name,m.tags,s.service_id serviceId,s.expires_at,services.name serviceName FROM user_sessions s JOIN users u ON u.id=s.user_id JOIN service_memberships m ON m.user_id=u.id AND m.service_id=s.service_id JOIN services ON services.id=s.service_id WHERE s.token_hash=? AND m.active=1`,
+    )
+    .get(hash(token));
+  if (!row || row.expires_at <= Date.now())
+    fail(401, "Your session has expired. Sign in again.");
+  return {
+    ...row,
+    tags: JSON.parse(row.tags),
+    tokenHash: hash(token),
+    actor: row.name + " (@" + row.username + ")",
+  };
+}
+const admin = (user) => {
+  if (!user?.tags.includes("Service Admin") || user.tags.includes("Read Only"))
+    fail(403, "Service Admin access is required");
+};
+const cleanUser = (row) => ({
+  id: row.id,
+  username: row.username,
+  name: row.name,
+  tags: JSON.parse(row.tags),
+  active: Boolean(row.active),
+});
+const audit = (db, user, action, details, serviceId = user?.serviceId) =>
+  db
+    .prepare(
+      "INSERT INTO identity_audit(service_id,actor_id,actor,action,details,created_at) VALUES(?,?,?,?,?,?)",
+    )
+    .run(
+      serviceId || null,
+      user?.id || null,
+      user?.actor || "Initial setup",
+      action,
+      JSON.stringify(details),
+      now(),
+    );
+const validPassword = (p) => {
+  if (typeof p !== "string" || p.length < 12 || p.length > 128)
+    fail(400, "Use a password between 12 and 128 characters");
+};
+const validTags = (tags) => {
+  if (
+    !Array.isArray(tags) ||
+    !tags.length ||
+    new Set(tags).size !== tags.length ||
+    tags.some((tag) => !accessTags.some((t) => t.id === tag))
+  )
+    fail(400, "Choose valid role and permission tags");
+};
+function serviceFields(body) {
+  const result = {};
+  for (const key of [
+    "name",
+    "deaRegistrant",
+    "deaNumber",
+    "deaExpiresOn",
+    "deaSchedules",
+    "address",
+    "contactName",
+    "contactEmail",
+    "contactPhone",
+    "notes",
+  ]) {
+    const value = body[key] ?? "";
+    if (
+      typeof value !== "string" ||
+      value.length > (key === "notes" ? 2000 : 500)
+    )
+      fail(400, "Invalid service " + key);
+    result[key] = value.trim();
+  }
+  if (!result.name) fail(400, "Service name is required");
+  result.deaNumber = result.deaNumber.toUpperCase();
+  if (result.deaNumber && !/^[A-Z]{2}\d{7}$/.test(result.deaNumber))
+    fail(400, "DEA registration number must have two letters and seven digits");
+  if (
+    result.deaExpiresOn &&
+    (!/^\d{4}-\d{2}-\d{2}$/.test(result.deaExpiresOn) ||
+      !Number.isFinite(Date.parse(result.deaExpiresOn)) ||
+      new Date(result.deaExpiresOn).toISOString().slice(0, 10) !==
+        result.deaExpiresOn)
+  )
+    fail(400, "Enter a valid DEA expiration date");
+  return result;
+}
+function userFields(body) {
+  if (
+    typeof body.username !== "string" ||
+    !/^[a-zA-Z0-9._@+-]{3,80}$/.test(body.username) ||
+    typeof body.name !== "string" ||
+    !body.name.trim() ||
+    body.name.length > 100
+  )
+    fail(
+      400,
+      "Enter a name and username (3–80 letters, numbers, . _ @ + or -)",
+    );
+  validTags(body.tags);
+  return { username: body.username.toLowerCase(), name: body.name.trim() };
+}
+export async function authRoute(db, req, res, url, readBody) {
+  const path = url.pathname;
+  if (
+    !path.startsWith("/api/auth/") &&
+    !["/api/users", "/api/services"].includes(path)
+  )
+    return false;
+  const send = (status, data) => {
+    res.writeHead(status, {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+    });
+    res.end(JSON.stringify(data));
+    return true;
+  };
+  const issue = (id, serviceId) => {
+    db.prepare("DELETE FROM user_sessions WHERE expires_at<=?").run(Date.now());
+    const token = randomBytes(32).toString("hex");
+    db.prepare("INSERT INTO user_sessions VALUES(?,?,?,?)").run(
+      hash(token),
+      id,
+      serviceId,
+      Date.now() + 8 * 3600000,
+    );
+    res.setHeader(
+      "Set-Cookie",
+      `emcore_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800${req.socket.encrypted || process.env.EMCORE_SECURE_COOKIE === "1" ? "; Secure" : ""}`,
+    );
+  };
+  if (req.method === "GET" && path === "/api/auth/status") {
+    let user = null;
+    try {
+      user = sessionContext(db, req);
+    } catch {}
+    return send(200, {
+      setupRequired: !db.prepare("SELECT 1 FROM users LIMIT 1").get(),
+      user: user
+        ? {
+            id: user.id,
+            name: user.name,
+            username: user.username,
+            serviceId: user.serviceId,
+            serviceName: user.serviceName,
+            tags: user.tags,
+          }
+        : null,
+    });
+  }
+  if (req.method === "POST" && path === "/api/auth/setup") {
+    const body = await readBody();
+    if (db.prepare("SELECT 1 FROM users LIMIT 1").get())
+      fail(409, "Initial setup is already complete");
+    const fields = userFields({ ...body, tags: ["User", "Service Admin"] }),
+      service = serviceFields({ name: body.serviceName });
+    validPassword(body.password);
+    const userId = randomUUID();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      if (db.prepare("SELECT 1 FROM users LIMIT 1").get())
+        fail(409, "Initial setup is already complete");
+      db.prepare("INSERT INTO services VALUES(?,?,?)").run(
+        "primary",
+        service.name,
+        JSON.stringify(service),
+      );
+      db.prepare("INSERT INTO users VALUES(?,?,?,?,?)").run(
+        userId,
+        fields.username,
+        fields.name,
+        passwordHash(body.password),
+        now(),
+      );
+      db.prepare("INSERT INTO service_memberships VALUES(?,?,?,1)").run(
+        userId,
+        "primary",
+        JSON.stringify(defaultProfiles[0].tags),
+      );
+      audit(
+        db,
+        {
+          id: userId,
+          actor: fields.name + " (@" + fields.username + ")",
+          serviceId: "primary",
+        },
+        "Initial administrator created",
+        { username: fields.username },
+      );
+      db.exec("COMMIT");
+    } catch (e) {
+      db.exec("ROLLBACK");
+      throw e;
+    }
+    issue(userId, "primary");
+    return send(200, { ok: true });
+  }
+  if (req.method === "POST" && path === "/api/auth/login") {
+    const body = await readBody();
+    const username =
+        typeof body.username === "string"
+          ? body.username.toLowerCase().slice(0, 80)
+          : "",
+      key = hash((req.socket.remoteAddress || "") + ":" + username),
+      attempt = db.prepare("SELECT * FROM login_attempts WHERE key=?").get(key);
+    if (attempt && attempt.until_ms > Date.now() && attempt.failures >= 5)
+      fail(429, "Too many attempts. Try again in 15 minutes.");
+    const user = db
+      .prepare("SELECT * FROM users WHERE username=? COLLATE NOCASE")
+      .get(username);
+    const membership = user
+      ? db
+          .prepare(
+            "SELECT * FROM service_memberships WHERE user_id=? AND active=1 ORDER BY service_id",
+          )
+          .get(user.id)
+      : null;
+    const valid =
+      typeof body.password === "string" &&
+      body.password.length <= 128 &&
+      matches(
+        body.password,
+        user?.password_hash ||
+          "00000000000000000000000000000000:" +
+            scryptSync(
+              "invalid-password",
+              "00000000000000000000000000000000",
+              64,
+            ).toString("hex"),
+      );
+    if (!user || !membership || !valid) {
+      if (user)
+        for (const m of db
+          .prepare("SELECT service_id FROM service_memberships WHERE user_id=?")
+          .all(user.id))
+          audit(
+            db,
+            { id: user.id, actor: "Unauthenticated", serviceId: m.service_id },
+            "Sign-in failed",
+            { username: user.username },
+          );
+      db.prepare("DELETE FROM login_attempts WHERE until_ms<?").run(Date.now());
+      db.prepare(
+        "INSERT INTO login_attempts VALUES(?,1,?) ON CONFLICT(key) DO UPDATE SET failures=failures+1",
+      ).run(key, Date.now() + 900000);
+      fail(401, "Username or password is incorrect");
+    }
+    db.prepare("DELETE FROM login_attempts WHERE key=?").run(key);
+    issue(user.id, membership.service_id);
+    audit(
+      db,
+      {
+        id: user.id,
+        actor: user.name + " (@" + user.username + ")",
+        serviceId: membership.service_id,
+      },
+      "Signed in",
+      {},
+    );
+    return send(200, { ok: true });
+  }
+  const user = sessionContext(db, req);
+  if (req.method === "POST" && path === "/api/auth/logout") {
+    db.prepare("DELETE FROM user_sessions WHERE token_hash=?").run(
+      user.tokenHash,
+    );
+    audit(db, user, "Signed out", {});
+    res.setHeader(
+      "Set-Cookie",
+      "emcore_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
+    );
+    return send(200, { ok: true });
+  }
+  if (req.method === "POST" && path === "/api/auth/password") {
+    const body = await readBody();
+    const row = db
+      .prepare("SELECT password_hash FROM users WHERE id=?")
+      .get(user.id);
+    if (
+      typeof body.currentPassword !== "string" ||
+      body.currentPassword.length > 128 ||
+      !matches(body.currentPassword, row.password_hash)
+    )
+      fail(400, "Current password is incorrect");
+    validPassword(body.password);
+    db.prepare("UPDATE users SET password_hash=? WHERE id=?").run(
+      passwordHash(body.password),
+      user.id,
+    );
+    db.prepare("DELETE FROM user_sessions WHERE user_id=?").run(user.id);
+    audit(db, user, "Password changed", {});
+    issue(user.id, user.serviceId);
+    return send(200, { ok: true });
+  }
+  if (req.method === "POST" && path === "/api/auth/service") {
+    const body = await readBody();
+    if (
+      !db
+        .prepare(
+          "SELECT 1 FROM service_memberships WHERE user_id=? AND service_id=? AND active=1",
+        )
+        .get(user.id, body.serviceId)
+    )
+      fail(403, "You do not belong to that service");
+    db.prepare("UPDATE user_sessions SET service_id=? WHERE token_hash=?").run(
+      body.serviceId,
+      user.tokenHash,
+    );
+    audit(db, user, "Service selected", {}, body.serviceId);
+    return send(200, { ok: true });
+  }
+  if (req.method === "GET" && path === "/api/services") {
+    const services = db
+      .prepare(
+        "SELECT s.id,s.name,s.details,m.tags FROM services s JOIN service_memberships m ON m.service_id=s.id WHERE m.user_id=? AND m.active=1 ORDER BY s.name",
+      )
+      .all(user.id)
+      .map((s) => ({
+        id: s.id,
+        name: s.name,
+        ...(s.id === user.serviceId &&
+        user.tags.includes("Service Admin") &&
+        !user.tags.includes("Read Only")
+          ? JSON.parse(s.details)
+          : {}),
+      }));
+    return send(200, { services });
+  }
+  admin(user);
+  if (req.method === "GET" && path === "/api/users")
+    return send(200, {
+      users: db
+        .prepare(
+          "SELECT u.id,u.username,u.name,m.tags,m.active FROM users u JOIN service_memberships m ON m.user_id=u.id WHERE m.service_id=? ORDER BY u.name",
+        )
+        .all(user.serviceId)
+        .map(cleanUser),
+    });
+  if (req.method !== "POST") fail(404, "Not found");
+  const body = await readBody();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    if (path === "/api/services") {
+      const service = serviceFields(body),
+        id = body.id || randomUUID();
+      if (body.id && body.id !== user.serviceId)
+        fail(403, "Select a service before editing it");
+      db.prepare(
+        "INSERT INTO services VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,details=excluded.details",
+      ).run(id, service.name, JSON.stringify(service));
+      if (!body.id)
+        db.prepare("INSERT INTO service_memberships VALUES(?,?,?,1)").run(
+          user.id,
+          id,
+          JSON.stringify(user.tags),
+        );
+      audit(
+        db,
+        user,
+        body.id ? "Service updated" : "Service created",
+        {
+          name: service.name,
+          fields: Object.keys(service).filter((key) => service[key]),
+        },
+        id,
+      );
+    } else if (path === "/api/users") {
+      const fields = userFields(body),
+        id = body.id || randomUUID();
+      if (body.active !== undefined && typeof body.active !== "boolean")
+        fail(400, "Invalid active status");
+      const active = body.active !== false;
+      const existing = body.id
+        ? db
+            .prepare(
+              "SELECT * FROM service_memberships WHERE user_id=? AND service_id=?",
+            )
+            .get(id, user.serviceId)
+        : null;
+      if (body.id && !existing) fail(404, "User not found in this service");
+      if (
+        db
+          .prepare(
+            "SELECT 1 FROM users WHERE username=? COLLATE NOCASE AND id<>?",
+          )
+          .get(fields.username, id)
+      )
+        fail(409, "Username already exists");
+      if (body.password || !body.id) validPassword(body.password);
+      if (existing) {
+        const admins = db
+          .prepare(
+            "SELECT user_id,tags FROM service_memberships WHERE service_id=? AND active=1",
+          )
+          .all(user.serviceId)
+          .filter((m) => {
+            const tags = JSON.parse(m.tags);
+            return (
+              tags.includes("Service Admin") && !tags.includes("Read Only")
+            );
+          });
+        if (
+          admins.some((m) => m.user_id === id) &&
+          admins.length === 1 &&
+          (!active ||
+            !body.tags.includes("Service Admin") ||
+            body.tags.includes("Read Only"))
+        )
+          fail(400, "Keep at least one active Service Admin");
+        db.prepare("UPDATE users SET username=?,name=? WHERE id=?").run(
+          fields.username,
+          fields.name,
+          id,
+        );
+        db.prepare(
+          "UPDATE service_memberships SET tags=?,active=? WHERE user_id=? AND service_id=?",
+        ).run(JSON.stringify(body.tags), Number(active), id, user.serviceId);
+        if (body.password)
+          db.prepare("UPDATE users SET password_hash=? WHERE id=?").run(
+            passwordHash(body.password),
+            id,
+          );
+        if (body.password || !active)
+          db.prepare("DELETE FROM user_sessions WHERE user_id=?").run(id);
+      } else {
+        db.prepare("INSERT INTO users VALUES(?,?,?,?,?)").run(
+          id,
+          fields.username,
+          fields.name,
+          passwordHash(body.password),
+          now(),
+        );
+        db.prepare("INSERT INTO service_memberships VALUES(?,?,?,?)").run(
+          id,
+          user.serviceId,
+          JSON.stringify(body.tags),
+          Number(active),
+        );
+      }
+      audit(db, user, existing ? "User updated" : "User created", {
+        userId: id,
+        username: fields.username,
+        tags: body.tags,
+        active,
+        passwordReset: Boolean(body.password && existing),
+      });
+    } else fail(404, "Not found");
+    db.exec("COMMIT");
+    return send(200, { ok: true });
+  } catch (e) {
+    db.exec("ROLLBACK");
+    throw e;
+  }
 }
 
-
-export function verifyWitnessCredentials(db,credentials,operator,remoteAddress){
- const username=typeof credentials?.username==='string'?credentials.username.trim().toLowerCase().slice(0,80):''
- const key=hash('witness:'+(remoteAddress||'')+':'+username),attempt=db.prepare('SELECT * FROM login_attempts WHERE key=?').get(key)
- if(attempt&&attempt.until_ms>Date.now()&&attempt.failures>=5)fail(429,'Too many witness sign-in attempts. Try again in 15 minutes.')
- const user=db.prepare(`SELECT u.id,u.name,u.username,u.password_hash,m.tags FROM users u JOIN service_memberships m ON m.user_id=u.id WHERE u.username=? COLLATE NOCASE AND m.service_id=? AND m.active=1`).get(username,operator.serviceId)
- const valid=typeof credentials?.password==='string'&&credentials.password.length<=128&&matches(credentials.password,user?.password_hash||'00000000000000000000000000000000:'+scryptSync('invalid-password','00000000000000000000000000000000',64).toString('hex'))
- if(!user||!valid)throw Object.assign(new Error('Witness username or password is incorrect, or the account is inactive in this service.'),{status:422,witnessFailureKey:key})
- const tags=JSON.parse(user.tags)
- if(user.id===operator.id)fail(422,'The witness must be a different user from the signed-in operator.')
- if(!tags.includes('Can Witness')||tags.includes('Read Only'))fail(422,'This user must have Can Witness and must not be Read Only.')
- db.prepare('DELETE FROM login_attempts WHERE key=?').run(key)
- return {id:user.id,name:user.name,username:user.username,tags,serviceId:operator.serviceId}
+export function verifyWitnessCredentials(
+  db,
+  credentials,
+  operator,
+  remoteAddress,
+) {
+  const username =
+    typeof credentials?.username === "string"
+      ? credentials.username.trim().toLowerCase().slice(0, 80)
+      : "";
+  const key = hash("witness:" + (remoteAddress || "") + ":" + username),
+    attempt = db.prepare("SELECT * FROM login_attempts WHERE key=?").get(key);
+  if (attempt && attempt.until_ms > Date.now() && attempt.failures >= 5)
+    fail(429, "Too many witness sign-in attempts. Try again in 15 minutes.");
+  const user = db
+    .prepare(
+      `SELECT u.id,u.name,u.username,u.password_hash,m.tags FROM users u JOIN service_memberships m ON m.user_id=u.id WHERE u.username=? COLLATE NOCASE AND m.service_id=? AND m.active=1`,
+    )
+    .get(username, operator.serviceId);
+  const valid =
+    typeof credentials?.password === "string" &&
+    credentials.password.length <= 128 &&
+    matches(
+      credentials.password,
+      user?.password_hash ||
+        "00000000000000000000000000000000:" +
+          scryptSync(
+            "invalid-password",
+            "00000000000000000000000000000000",
+            64,
+          ).toString("hex"),
+    );
+  if (!user || !valid)
+    throw Object.assign(
+      new Error(
+        "Witness username or password is incorrect, or the account is inactive in this service.",
+      ),
+      { status: 422, witnessFailureKey: key },
+    );
+  const tags = JSON.parse(user.tags);
+  if (user.id === operator.id)
+    fail(
+      422,
+      "The witness must be a different user from the signed-in operator.",
+    );
+  if (!tags.includes("Can Witness") || tags.includes("Read Only"))
+    fail(422, "This user must have Can Witness and must not be Read Only.");
+  db.prepare("DELETE FROM login_attempts WHERE key=?").run(key);
+  return {
+    id: user.id,
+    name: user.name,
+    username: user.username,
+    tags,
+    serviceId: operator.serviceId,
+  };
 }
