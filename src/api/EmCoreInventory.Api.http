@@ -1,0 +1,9 @@
+@EmCoreInventory_Api_HostAddress = http://127.0.0.1:3001
+
+GET {{EmCoreInventory_Api_HostAddress}}/api/health
+Accept: application/json
+
+###
+
+GET {{EmCoreInventory_Api_HostAddress}}/api/auth/status
+Accept: application/json

@@ -1,0 +1,27 @@
+{
+  "name": "@emcore/web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "oxlint src",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "bootstrap": "*",
+    "lucide-react": "*",
+    "qr-scanner": "*",
+    "qrcode": "*",
+    "react": "*",
+    "react-dom": "*"
+  },
+  "devDependencies": {
+    "@types/react": "*",
+    "@types/react-dom": "*",
+    "@vitejs/plugin-react": "*",
+    "oxlint": "*",
+    "vite": "*"
+  }
+}

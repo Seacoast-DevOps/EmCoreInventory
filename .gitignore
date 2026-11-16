@@ -37,3 +37,7 @@ server/data/
 *.pem
 *.key
 *.pfx
+
+# .NET build output
+**/bin/
+**/obj/
