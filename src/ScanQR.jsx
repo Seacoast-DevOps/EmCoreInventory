@@ -1,15 +1,205 @@
-import {useEffect,useRef,useState} from 'react'
-import {Camera,ScanLine} from 'lucide-react'
-import {request} from './api.js'
-import {ClearTextarea} from './FormControls.jsx'
-import History from './History.jsx'
-export default function ScanQR(){
- const [value,setValue]=useState(''),[error,setError]=useState(''),[result,setResult]=useState(null),[camera,setCamera]=useState(false),[busy,setBusy]=useState(false),[history,setHistory]=useState(false)
- const video=useRef(null),scanner=useRef(null),alive=useRef(true),decoding=useRef(false),starting=useRef(false),fileInput=useRef(null)
- useEffect(()=>{alive.current=true;return()=>{alive.current=false;scanner.current?.destroy();scanner.current=null}},[])
- function stop(){scanner.current?.destroy();scanner.current=null;setCamera(false)}
- async function resolve(raw){if(decoding.current)return;decoding.current=true;stop();setBusy(true);setError('');setResult(null);setValue(raw);try{const data=await request('qr/resolve?value='+encodeURIComponent(raw));if(alive.current)setResult(data)}catch(e){if(alive.current)setError(e.message)}finally{decoding.current=false;if(alive.current)setBusy(false)}}
- async function start(){if(starting.current)return;starting.current=true;setError('');try{if(!window.isSecureContext)throw Error('Camera scanning requires HTTPS (or localhost). Use a QR image or enter the tracking code below.');const {default:QrScanner}=await import('qr-scanner');if(!alive.current)return;scanner.current?.destroy();const instance=new QrScanner(video.current,r=>resolve(r.data),{returnDetailedScanResult:true,preferredCamera:'environment',maxScansPerSecond:5});scanner.current=instance;await instance.start();if(!alive.current)instance.destroy();else setCamera(true)}catch{stop();setError('Camera unavailable or permission denied. Choose a QR image or enter its tracking code below.')}finally{starting.current=false}}
- async function image(event){const file=event.target.files?.[0];event.target.value='';if(!file)return;stop();setError('');setBusy(true);try{if(file.size>15*1024*1024)throw Error('Choose a QR image smaller than 15 MB.');const {default:QrScanner}=await import('qr-scanner');const scanned=await QrScanner.scanImage(file,{returnDetailedScanResult:true});await resolve(scanned.data)}catch(e){setError(e instanceof Error?e.message:'No readable QR code found in that image. Try a clearer image or enter its code.')}finally{setBusy(false)}}
- return <section className="scanner-page"><p>Scan an EMCore vial label to find its medication, location, and history in the current service.</p><div className="scanner-preview" hidden={!camera}><video ref={video} muted playsInline aria-label="QR camera preview"/></div><div className="scanner-actions"><button className="action-primary" disabled={busy||camera} onClick={start}><Camera size={19}/> Start camera</button>{camera&&<button className="cancel-button" onClick={stop}>Stop camera</button>}<button className="cancel-button" disabled={busy} onClick={()=>fileInput.current.click()}>Choose QR image</button><input ref={fileInput} type="file" accept="image/*" className="visually-hidden" aria-label="QR image" onChange={image}/></div><form className="form-stack" onSubmit={e=>{e.preventDefault();resolve(value)}}><label>QR text or tracking code<ClearTextarea clearLabel="QR text or tracking code" className="form-control" required maxLength={300} rows={2} value={value} onChange={e=>setValue(e.target.value)}/></label><button className="action-primary" disabled={busy}><ScanLine size={19}/>{busy?'Looking up…':'Find vial'}</button></form>{error&&<p className="error-note" role="alert">{error}</p>}{result&&<article className="settings-card scan-result"><h2>{result.item.medication}</h2><p>{result.item.presentation}<br/><code>{result.item.code}</code> · {result.item.status}<br/>{result.box?.location} — {result.box?.name}</p>{result.item.lot_number&&<p>Lot {result.item.lot_number} · Expires {result.item.expires_on}</p>}<p>{result.item.remaining_amount??'Unknown'} remaining / {result.item.amount_total??'Unknown'} total</p><button className="action-primary" onClick={()=>setHistory(true)}>Open vial record / QR</button></article>}{history&&result&&<History identity={result.item.code} boxes={result.box?[{id:result.item.box_id,...result.box}]:[]} onClose={()=>setHistory(false)}/>}</section>
+import { useEffect, useRef, useState } from "react";
+import { Camera, ScanLine } from "lucide-react";
+import { request } from "./api.js";
+import { ClearTextarea } from "./FormControls.jsx";
+import History from "./History.jsx";
+export default function ScanQR() {
+  const [value, setValue] = useState(""),
+    [error, setError] = useState(""),
+    [result, setResult] = useState(null),
+    [camera, setCamera] = useState(false),
+    [busy, setBusy] = useState(false),
+    [history, setHistory] = useState(false);
+  const video = useRef(null),
+    scanner = useRef(null),
+    alive = useRef(true),
+    decoding = useRef(false),
+    starting = useRef(false),
+    fileInput = useRef(null);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      scanner.current?.destroy();
+      scanner.current = null;
+    };
+  }, []);
+  function stop() {
+    scanner.current?.destroy();
+    scanner.current = null;
+    setCamera(false);
+  }
+  async function resolve(raw) {
+    if (decoding.current) return;
+    decoding.current = true;
+    stop();
+    setBusy(true);
+    setError("");
+    setResult(null);
+    setValue(raw);
+    try {
+      const data = await request("qr/resolve?value=" + encodeURIComponent(raw));
+      if (alive.current) setResult(data);
+    } catch (e) {
+      if (alive.current) setError(e.message);
+    } finally {
+      decoding.current = false;
+      if (alive.current) setBusy(false);
+    }
+  }
+  async function start() {
+    if (starting.current) return;
+    starting.current = true;
+    setError("");
+    try {
+      if (!window.isSecureContext)
+        throw Error(
+          "Camera scanning requires HTTPS (or localhost). Use a QR image or enter the tracking code below.",
+        );
+      const { default: QrScanner } = await import("qr-scanner");
+      if (!alive.current) return;
+      scanner.current?.destroy();
+      const instance = new QrScanner(video.current, (r) => resolve(r.data), {
+        returnDetailedScanResult: true,
+        preferredCamera: "environment",
+        maxScansPerSecond: 5,
+      });
+      scanner.current = instance;
+      await instance.start();
+      if (!alive.current) instance.destroy();
+      else setCamera(true);
+    } catch {
+      stop();
+      setError(
+        "Camera unavailable or permission denied. Choose a QR image or enter its tracking code below.",
+      );
+    } finally {
+      starting.current = false;
+    }
+  }
+  async function image(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    stop();
+    setError("");
+    setBusy(true);
+    try {
+      if (file.size > 15 * 1024 * 1024)
+        throw Error("Choose a QR image smaller than 15 MB.");
+      const { default: QrScanner } = await import("qr-scanner");
+      const scanned = await QrScanner.scanImage(file, {
+        returnDetailedScanResult: true,
+      });
+      await resolve(scanned.data);
+    } catch (e) {
+      setError(
+        e instanceof Error
+          ? e.message
+          : "No readable QR code found in that image. Try a clearer image or enter its code.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <section className="scanner-page">
+      <p>
+        Scan an EMCore vial label to find its medication, location, and history
+        in the current service.
+      </p>
+      <div className="scanner-preview" hidden={!camera}>
+        <video ref={video} muted playsInline aria-label="QR camera preview" />
+      </div>
+      <div className="scanner-actions">
+        <button
+          className="action-primary"
+          disabled={busy || camera}
+          onClick={start}
+        >
+          <Camera size={19} /> Start camera
+        </button>
+        {camera && (
+          <button className="cancel-button" onClick={stop}>
+            Stop camera
+          </button>
+        )}
+        <button
+          className="cancel-button"
+          disabled={busy}
+          onClick={() => fileInput.current.click()}
+        >
+          Choose QR image
+        </button>
+        <input
+          ref={fileInput}
+          type="file"
+          accept="image/*"
+          className="visually-hidden"
+          aria-label="QR image"
+          onChange={image}
+        />
+      </div>
+      <form
+        className="form-stack"
+        onSubmit={(e) => {
+          e.preventDefault();
+          resolve(value);
+        }}
+      >
+        <label>
+          QR text or tracking code
+          <ClearTextarea
+            clearLabel="QR text or tracking code"
+            className="form-control"
+            required
+            maxLength={300}
+            rows={2}
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+          />
+        </label>
+        <button className="action-primary" disabled={busy}>
+          <ScanLine size={19} />
+          {busy ? "Looking up…" : "Find vial"}
+        </button>
+      </form>
+      {error && (
+        <p className="error-note" role="alert">
+          {error}
+        </p>
+      )}
+      {result && (
+        <article className="settings-card scan-result">
+          <h2>{result.item.medication}</h2>
+          <p>
+            {result.item.presentation}
+            <br />
+            <code>{result.item.code}</code> · {result.item.status}
+            <br />
+            {result.box?.location} — {result.box?.name}
+          </p>
+          {result.item.lot_number && (
+            <p>
+              Lot {result.item.lot_number} · Expires {result.item.expires_on}
+            </p>
+          )}
+          <p>
+            {result.item.remaining_amount ?? "Unknown"} remaining /{" "}
+            {result.item.amount_total ?? "Unknown"} total
+          </p>
+          <button className="action-primary" onClick={() => setHistory(true)}>
+            Open vial record / QR
+          </button>
+        </article>
+      )}
+      {history && result && (
+        <History
+          identity={result.item.code}
+          boxes={result.box ? [{ id: result.item.box_id, ...result.box }] : []}
+          onClose={() => setHistory(false)}
+        />
+      )}
+    </section>
+  );
 }

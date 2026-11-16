@@ -1,18 +1,352 @@
-import {useEffect,useState} from 'react'
-import {request} from './api.js'
-import {useAccess} from './access-state.js'
-import {ClearInput,ClearTextarea} from './FormControls.jsx'
-import Modal from './Modal.jsx'
-const fields={name:'Company name',serviceChief:'Service Chief',deaContact:'DEA Contact',backupDeaContact:'Backup DEA Contact',medicalDirector:'Medical Director',assistantMedicalDirector:'Assistant Medical Director',deaRegistrant:'DEA registrant name',deaNumber:'DEA registration number',deaExpiresOn:'DEA expiration date',deaSchedules:'DEA schedules',address:'Registered address',contactName:'General contact name',contactEmail:'Contact email',contactPhone:'Contact phone',notes:'Notes'}
-export default function Companies(){
- const {access,refresh,selectService,isSeacoast}=useAccess(),[companies,setCompanies]=useState([]),[deleted,setDeleted]=useState([]),[editing,setEditing]=useState(null),[lifecycle,setLifecycle]=useState(null),[name,setName]=useState(''),[password,setPassword]=useState(''),[ack,setAck]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState('')
- async function load(){try{const result=await request('services');setCompanies(result.services);setDeleted(result.deletedCompanies||[])}catch(e){setError(e.message)}}
- useEffect(()=>{Promise.resolve().then(load)},[])
- async function save(e){e.preventDefault();setBusy(true);setError('');try{await request('services',editing);setEditing(null);await load();await refresh()}catch(e){setError(e.message)}finally{setBusy(false)}}
- async function action(e){e.preventDefault();setBusy(true);setError('');try{const target=lifecycle.company;await request(lifecycle.kind==='delete'?'companies/delete':'companies/status',lifecycle.kind==='delete'?{id:target.id,confirmCompanyName:name,currentPassword:password,acknowledgePermanentDeletion:ack}:{id:target.id,active:!target.active});setPassword('');setLifecycle(null);await refresh();await load()}catch(e){setPassword('');setError(e.message)}finally{setBusy(false)}}
- function openLifecycle(company,kind){setName('');setPassword('');setAck(false);setError('');setLifecycle({company,kind})}
- return <section>{isSeacoast&&<button className="action-primary" onClick={()=>{setError('');setEditing({name:''})}}>Create company</button>}<p>Company Admins maintain their company’s contact and DEA information. Only Seacoast Admin can create, deactivate/reactivate, permanently delete companies, or edit company permissions.</p>{error&&!editing&&!lifecycle&&<p role="alert" className="error-note">{error}</p>}{companies.map(company=><article className="settings-card" key={company.id}><h2>{company.name}</h2><p>{company.active?'Active':'Deactivated'}{company.id===access.user.serviceId?' · Current company':''}</p>{company.id===access.user.serviceId?<><p>{company.deaRegistrant||'DEA registrant not entered'}<br/>{company.deaNumber||'DEA number not entered'}</p><button className="cancel-button" onClick={()=>{setError('');setEditing(company)}}>Edit company / admin contacts</button></>:<button className="cancel-button" onClick={async()=>{try{await selectService(company.id)}catch(e){setError(e.message)}}}>Select company</button>}{isSeacoast&&<div className="dialog-actions"><button className="cancel-button" onClick={()=>openLifecycle(company,'status')}>{company.active?'Deactivate':'Reactivate'}</button><button className="cancel-button danger-button" onClick={()=>openLifecycle(company,'delete')}>Hard delete</button></div>}</article>)}{deleted.length>0&&<details className="settings-card"><summary>Permanently deleted companies</summary>{deleted.map(company=><p key={company.id}>{company.name} · {new Date(company.deleted_at).toLocaleString()}</p>)}</details>}
- {editing&&<Modal title={editing.id?'Edit company / admin contacts':'Create company'} busy={busy} onClose={()=>setEditing(null)}><form className="form-stack" onSubmit={save}>{Object.entries(fields).map(([key,label])=><label key={key}>{label}{key==='notes'?<ClearTextarea clearLabel={label} maxLength={2000} value={editing[key]||''} onChange={e=>setEditing({...editing,[key]:e.target.value})}/>:<ClearInput clearLabel={label} required={key==='name'} type={key==='deaExpiresOn'?'date':key==='contactEmail'?'email':'text'} maxLength={500} value={editing[key]||''} onChange={e=>setEditing({...editing,[key]:e.target.value})}/>}</label>)}<p className="field-help">Contact titles are administrative contacts, not permission grants. DEA details are stored as entered, not externally verified.</p>{error&&<p role="alert" className="error-note">{error}</p>}<div className="dialog-actions"><button type="button" className="cancel-button" onClick={()=>setEditing(null)}>Cancel</button><button className="action-primary" disabled={busy}>Save company</button></div></form></Modal>}
- {lifecycle&&<Modal title={lifecycle.kind==='delete'?'Permanently delete company':lifecycle.company.active?'Deactivate company':'Reactivate company'} busy={busy} onClose={()=>{setPassword('');setLifecycle(null)}}><form className="form-stack" onSubmit={action}><p><strong>{lifecycle.company.name}</strong></p>{lifecycle.kind==='delete'?<><p>This permanently removes the company’s operational stock, checks, incidents, policies, signoffs, and memberships. Global login accounts and a deletion audit entry remain. This cannot be undone in the app.</p><label>Type the exact company name<ClearInput clearLabel="Confirm company name" required value={name} onChange={e=>setName(e.target.value)}/></label><label>Your current password<ClearInput clearLabel="Current password for deletion" type="password" autoComplete="off" maxLength={128} required value={password} onChange={e=>setPassword(e.target.value)}/></label><label className="settings-check"><ClearInput type="checkbox" required checked={ack} onChange={e=>setAck(e.target.checked)}/>I acknowledge permanent deletion</label></>:<p>Changing company status revokes its sessions. Deactivated company data remains available for reactivation; routine inventory operations are blocked.</p>}{error&&<p role="alert" className="error-note">{error}</p>}<div className="dialog-actions"><button type="button" className="cancel-button" onClick={()=>{setPassword('');setLifecycle(null)}}>Cancel</button><button className="action-primary" disabled={busy||lifecycle.kind==='delete'&&(!ack||name!==lifecycle.company.name)}>Confirm {lifecycle.kind==='delete'?'permanent deletion':lifecycle.company.active?'deactivation':'reactivation'}</button></div></form></Modal>}</section>
+import { useEffect, useState } from "react";
+import { request } from "./api.js";
+import { useAccess } from "./access-state.js";
+import { ClearInput, ClearTextarea } from "./FormControls.jsx";
+import Modal from "./Modal.jsx";
+const fields = {
+  name: "Company name",
+  serviceChief: "Service Chief",
+  deaContact: "DEA Contact",
+  backupDeaContact: "Backup DEA Contact",
+  medicalDirector: "Medical Director",
+  assistantMedicalDirector: "Assistant Medical Director",
+  deaRegistrant: "DEA registrant name",
+  deaNumber: "DEA registration number",
+  deaExpiresOn: "DEA expiration date",
+  deaSchedules: "DEA schedules",
+  address: "Registered address",
+  contactName: "General contact name",
+  contactEmail: "Contact email",
+  contactPhone: "Contact phone",
+  notes: "Notes",
+};
+export default function Companies() {
+  const { access, refresh, selectService, isSeacoast } = useAccess(),
+    [companies, setCompanies] = useState([]),
+    [deleted, setDeleted] = useState([]),
+    [editing, setEditing] = useState(null),
+    [lifecycle, setLifecycle] = useState(null),
+    [name, setName] = useState(""),
+    [password, setPassword] = useState(""),
+    [ack, setAck] = useState(false),
+    [busy, setBusy] = useState(false),
+    [error, setError] = useState("");
+  async function load() {
+    try {
+      const result = await request("services");
+      setCompanies(result.services);
+      setDeleted(result.deletedCompanies || []);
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+  useEffect(() => {
+    Promise.resolve().then(load);
+  }, []);
+  async function save(e) {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      await request("services", editing);
+      setEditing(null);
+      await load();
+      await refresh();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function action(e) {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      const target = lifecycle.company;
+      await request(
+        lifecycle.kind === "delete" ? "companies/delete" : "companies/status",
+        lifecycle.kind === "delete"
+          ? {
+              id: target.id,
+              confirmCompanyName: name,
+              currentPassword: password,
+              acknowledgePermanentDeletion: ack,
+            }
+          : { id: target.id, active: !target.active },
+      );
+      setPassword("");
+      setLifecycle(null);
+      await refresh();
+      await load();
+    } catch (e) {
+      setPassword("");
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  function openLifecycle(company, kind) {
+    setName("");
+    setPassword("");
+    setAck(false);
+    setError("");
+    setLifecycle({ company, kind });
+  }
+  return (
+    <section>
+      {isSeacoast && (
+        <button
+          className="action-primary"
+          onClick={() => {
+            setError("");
+            setEditing({ name: "" });
+          }}
+        >
+          Create company
+        </button>
+      )}
+      <p>
+        Company Admins maintain their company’s contact and DEA information.
+        Only Seacoast Admin can create, deactivate/reactivate, permanently
+        delete companies, or edit company permissions.
+      </p>
+      {error && !editing && !lifecycle && (
+        <p role="alert" className="error-note">
+          {error}
+        </p>
+      )}
+      {companies.map((company) => (
+        <article className="settings-card" key={company.id}>
+          <h2>{company.name}</h2>
+          <p>
+            {company.active ? "Active" : "Deactivated"}
+            {company.id === access.user.serviceId ? " · Current company" : ""}
+          </p>
+          {company.id === access.user.serviceId ? (
+            <>
+              <p>
+                {company.deaRegistrant || "DEA registrant not entered"}
+                <br />
+                {company.deaNumber || "DEA number not entered"}
+              </p>
+              <button
+                className="cancel-button"
+                onClick={() => {
+                  setError("");
+                  setEditing(company);
+                }}
+              >
+                Edit company / admin contacts
+              </button>
+            </>
+          ) : (
+            <button
+              className="cancel-button"
+              onClick={async () => {
+                try {
+                  await selectService(company.id);
+                } catch (e) {
+                  setError(e.message);
+                }
+              }}
+            >
+              Select company
+            </button>
+          )}
+          {isSeacoast && (
+            <div className="dialog-actions">
+              <button
+                className="cancel-button"
+                onClick={() => openLifecycle(company, "status")}
+              >
+                {company.active ? "Deactivate" : "Reactivate"}
+              </button>
+              <button
+                className="cancel-button danger-button"
+                onClick={() => openLifecycle(company, "delete")}
+              >
+                Hard delete
+              </button>
+            </div>
+          )}
+        </article>
+      ))}
+      {deleted.length > 0 && (
+        <details className="settings-card">
+          <summary>Permanently deleted companies</summary>
+          {deleted.map((company) => (
+            <p key={company.id}>
+              {company.name} · {new Date(company.deleted_at).toLocaleString()}
+            </p>
+          ))}
+        </details>
+      )}
+      {editing && (
+        <Modal
+          title={
+            editing.id ? "Edit company / admin contacts" : "Create company"
+          }
+          busy={busy}
+          onClose={() => setEditing(null)}
+        >
+          <form className="form-stack" onSubmit={save}>
+            {Object.entries(fields).map(([key, label]) => (
+              <label key={key}>
+                {label}
+                {key === "notes" ? (
+                  <ClearTextarea
+                    clearLabel={label}
+                    maxLength={2000}
+                    value={editing[key] || ""}
+                    onChange={(e) =>
+                      setEditing({ ...editing, [key]: e.target.value })
+                    }
+                  />
+                ) : (
+                  <ClearInput
+                    clearLabel={label}
+                    required={key === "name"}
+                    type={
+                      key === "deaExpiresOn"
+                        ? "date"
+                        : key === "contactEmail"
+                          ? "email"
+                          : "text"
+                    }
+                    maxLength={500}
+                    value={editing[key] || ""}
+                    onChange={(e) =>
+                      setEditing({ ...editing, [key]: e.target.value })
+                    }
+                  />
+                )}
+              </label>
+            ))}
+            <p className="field-help">
+              Contact titles are administrative contacts, not permission grants.
+              DEA details are stored as entered, not externally verified.
+            </p>
+            {error && (
+              <p role="alert" className="error-note">
+                {error}
+              </p>
+            )}
+            <div className="dialog-actions">
+              <button
+                type="button"
+                className="cancel-button"
+                onClick={() => setEditing(null)}
+              >
+                Cancel
+              </button>
+              <button className="action-primary" disabled={busy}>
+                Save company
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+      {lifecycle && (
+        <Modal
+          title={
+            lifecycle.kind === "delete"
+              ? "Permanently delete company"
+              : lifecycle.company.active
+                ? "Deactivate company"
+                : "Reactivate company"
+          }
+          busy={busy}
+          onClose={() => {
+            setPassword("");
+            setLifecycle(null);
+          }}
+        >
+          <form className="form-stack" onSubmit={action}>
+            <p>
+              <strong>{lifecycle.company.name}</strong>
+            </p>
+            {lifecycle.kind === "delete" ? (
+              <>
+                <p>
+                  This permanently removes the company’s operational stock,
+                  checks, incidents, policies, signoffs, and memberships. Global
+                  login accounts and a deletion audit entry remain. This cannot
+                  be undone in the app.
+                </p>
+                <label>
+                  Type the exact company name
+                  <ClearInput
+                    clearLabel="Confirm company name"
+                    required
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                  />
+                </label>
+                <label>
+                  Your current password
+                  <ClearInput
+                    clearLabel="Current password for deletion"
+                    type="password"
+                    autoComplete="off"
+                    maxLength={128}
+                    required
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                  />
+                </label>
+                <label className="settings-check">
+                  <ClearInput
+                    type="checkbox"
+                    required
+                    checked={ack}
+                    onChange={(e) => setAck(e.target.checked)}
+                  />
+                  I acknowledge permanent deletion
+                </label>
+              </>
+            ) : (
+              <p>
+                Changing company status revokes its sessions. Deactivated
+                company data remains available for reactivation; routine
+                inventory operations are blocked.
+              </p>
+            )}
+            {error && (
+              <p role="alert" className="error-note">
+                {error}
+              </p>
+            )}
+            <div className="dialog-actions">
+              <button
+                type="button"
+                className="cancel-button"
+                onClick={() => {
+                  setPassword("");
+                  setLifecycle(null);
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                className="action-primary"
+                disabled={
+                  busy ||
+                  (lifecycle.kind === "delete" &&
+                    (!ack || name !== lifecycle.company.name))
+                }
+              >
+                Confirm{" "}
+                {lifecycle.kind === "delete"
+                  ? "permanent deletion"
+                  : lifecycle.company.active
+                    ? "deactivation"
+                    : "reactivation"}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+    </section>
+  );
 }
-
