@@ -194,11 +194,11 @@ test('transfer, opening, disposal and seal-breaking witness rules block changes 
 
   const attempt = await post('drugs', { definitionId: drug.id, boxId: 'unit-42-narcotic', quantity: 1, brokenSeals: [{ id: 'unit-42-narcotic', seal: '12345678' }] })
 
-  assert.equal(attempt.status, 422)
+  assert.equal(attempt.status, 200) // Paramedics do not require a seal partner under the matrix.
 
-  assert.equal((await get('inventory')).boxes.find(box => box.id === item.box_id).sealed, 1)
+  assert.equal((await get('inventory')).boxes.find(box => box.id === item.box_id).sealed, 0)
 
-  assert.equal(db.prepare('SELECT count(*) n FROM inventory_events').get().n, before)
+  assert.ok(db.prepare('SELECT count(*) n FROM inventory_events').get().n > before)
 
   assert.equal((await post('move', { ...move, witness: 'Witness', brokenSeals: [{ id: item.box_id, seal: '12345678' }] })).status, 200)
 

@@ -76,7 +76,7 @@ export default function Inventory({ onManage,onScan, initialReceive = false }) {
   const [history, setHistory] = useState(''), [lookup, setLookup] = useState(''), [busy, setBusy] = useState(false), [notice, setNotice] = useState(''), [pendingVerification,setPendingVerification] = useState(null)
   async function onCheckAction(path,body) {
     setBusy(true);setError('')
-    try {setData(await request(path,body));setNotice(path.endsWith('complete')?'Check complete. Enable Show completed checks to view it.':path.endsWith('start')?'Check started. Progress will be saved.':'Check progress saved.')}catch(error){setError(error.message)}finally{setBusy(false)}
+    try {setData(await request(path,body));setNotice(path==='seals'?'Seal action saved.':path.endsWith('complete')?'Check complete. Enable Show completed checks to view it.':path.endsWith('start')?'Check started. Progress will be saved.':'Check progress saved.');return true}catch(error){setError(error.message);return false}finally{setBusy(false)}
   }
   async function verify(item) {
     const check=data.checks.find(check=>check.boxId===item.box_id)

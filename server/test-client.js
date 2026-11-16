@@ -6,7 +6,7 @@ const sessions=new Map()
 export async function authenticatedFetch(url,options={}){
  const parsed=new URL(url),base=parsed.origin+'/api/',profile=options.headers?.['X-EMCore-Profile']||'service-admin'
  let state=sessions.get(base)
- if(!state){const status=await (await globalThis.fetch(base+'auth/status')).json();let response;if(status.setupRequired)response=await globalThis.fetch(base+'auth/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'Service Admin — Paramedic',username:'test-admin',password:'Test-Password-12345',serviceName:'Test EMS'})});else response=await globalThis.fetch(base+'auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:'test-admin',password:'Test-Password-12345'})});state={admin:response.headers.get('set-cookie')?.split(';')[0],profiles:new Map()};sessions.set(base,state)}
+ if(!state){const status=await (await globalThis.fetch(base+'auth/status')).json();let response;if(status.setupRequired)response=await globalThis.fetch(base+'auth/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'Service Admin — Paramedic',username:'test-admin',password:'Test-Password-12345',serviceName:'Test EMS',licenseLevel:'Paramedic'})});else response=await globalThis.fetch(base+'auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:'test-admin',password:'Test-Password-12345'})});state={admin:response.headers.get('set-cookie')?.split(';')[0],profiles:new Map()};sessions.set(base,state)}
  let cookie=state.admin
  if(profile!=='service-admin'){
   if(!state.profiles.has(profile)){

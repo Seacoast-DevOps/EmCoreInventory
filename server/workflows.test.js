@@ -244,7 +244,7 @@ test('saved inventory checks resume, reject stale writes and expire on the stric
 
 
 
-test('storage design saves schedules and resealing enforces witness rules',()=>fixture(async({get,post})=>{
+test('storage design saves schedules and Paramedics reseal without a partner',()=>fixture(async({get,post})=>{
 
  const create={name:'New box',location:'Unit 45',kind:'Drug box',icon:'truck',sealed:false,seal:'',transparent:false,checkIntervalHours:12}
 
@@ -260,11 +260,11 @@ test('storage design saves schedules and resealing enforces witness rules',()=>f
 
  assert.equal((await post('containers',seal)).status,409)
 
- assert.equal((await post('containers',{...seal,brokenSeals:[{id:source.id,seal:source.seal}]})).status,422)
+ assert.equal((await post('containers',{...seal,brokenSeals:[{id:source.id,seal:source.seal}]})).status,200)
 
- assert.equal((await get('inventory')).boxes.find(box=>box.id===source.id).seal,'12345678')
+ assert.equal((await get('inventory')).boxes.find(box=>box.id===source.id).seal,'87654321')
 
- result=await post('containers',{...seal,brokenSeals:[{id:source.id,seal:source.seal}],witness:'Witness'})
+ result=await post('containers',seal)
 
  assert.equal(result.status,200)
 

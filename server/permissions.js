@@ -1,3 +1,4 @@
+import {workflowMatrix,matrixRoles,matrixRole,licenseOf} from '../shared/matrix-rules.js'
 import { randomUUID } from 'node:crypto'
 import { accessTags, defaultProfiles, policyResources, medicationActions, permitted, medicationPermitted } from '../shared/access-rules.js'
 const fail=(status,message)=>{throw Object.assign(new Error(message),{status})}
@@ -20,17 +21,19 @@ export function migratePermissions(db){
    db.exec("UPDATE inventory_items SET was_opened=1 WHERE status='opened'")
    db.prepare('INSERT INTO inventory_seeds VALUES(4)').run()
   }
+  for(const resource of policyResources)db.prepare('INSERT OR IGNORE INTO access_rules VALUES(?,?)').run(resource.id,JSON.stringify(resource.defaultRule))
+  for(const profile of defaultProfiles)db.prepare('INSERT OR IGNORE INTO access_profiles VALUES(?,?,?)').run(profile.id,profile.name,JSON.stringify(profile.tags))
   db.exec('COMMIT')
  }catch(error){db.exec('ROLLBACK');throw error}
 }
 export function accessContext(db,profileId='service-admin',user=null){
  const row=db.prepare('SELECT * FROM access_profiles WHERE id=?').get(profileId)
- if(!row)fail(403,'Unknown access-preview profile')
- const profile=user?{id:user.id,name:user.name,tags:user.tags}:{id:row.id,name:row.name,tags:JSON.parse(row.tags)}
+ if(!row&&!user)fail(403,'Unknown access profile')
+ const profile=user?{id:user.id,name:user.name,tags:user.tags,licenseLevel:user.licenseLevel,platformRole:user.platformRole}:{id:row.id,name:row.name,tags:JSON.parse(row.tags)}
  const rules=Object.fromEntries(db.prepare('SELECT * FROM access_rules').all().map(rule=>[rule.resource,JSON.parse(rule.rule)]))
- return {...(user?{user:{id:user.id,username:user.username,name:user.name,serviceId:user.serviceId,serviceName:user.serviceName},actor:user.actor}:{}),profile,rules,permissions:Object.fromEntries(policyResources.map(resource=>[resource.id,permitted(profile,rules,resource.id)]))}
+ return {...(user?{user:{id:user.id,username:user.username,name:user.name,serviceId:user.serviceId,serviceName:user.serviceName,licenseLevel:user.licenseLevel,platformRole:user.platformRole,platformOnly:user.platformOnly},actor:user.actor}:{}),profile,rules,permissions:Object.fromEntries(policyResources.map(resource=>[resource.id,(!user?.platformOnly&&user?.companyActive!==0||['home.view','companies.create','companies.edit','companies.contacts','companies.activate','companies.delete'].includes(resource.id))&&permitted(profile,rules,resource.id)]))}
 }
-export function accessSnapshot(db,context){return {...context,tags:accessTags,resources:policyResources,medicationActions,profiles:db.prepare('SELECT * FROM access_profiles ORDER BY name').all().map(profile=>({...profile,tags:JSON.parse(profile.tags)}))}}
+export function accessSnapshot(db,context){return {...context,matrix:workflowMatrix,matrixRoles,matrixRole:matrixRole(context.profile),licenseLevel:licenseOf(context.profile),tags:accessTags,resources:policyResources,medicationActions,profiles:db.prepare('SELECT * FROM access_profiles ORDER BY name').all().map(profile=>({...profile,tags:JSON.parse(profile.tags)}))}}
 export function authorize(context,resource){if(!context.permissions[resource])fail(403,'Your account cannot '+(policyResources.find(item=>item.id===resource)?.label.toLowerCase()||resource))}
 export function authorizeMedication(context,drug,action){if(!medicationPermitted(context.profile,drug,action))fail(403,'Medication policy does not allow '+action+' for '+(drug?.name||drug?.medication||'this drug'))}
 export function drugForItem(db,item){return item?.definition_id?db.prepare('SELECT * FROM drug_definitions WHERE id=?').get(item.definition_id):item}
@@ -47,11 +50,11 @@ export function saveAccess(db,path,body,now){
   if(typeof body.name!=='string'||!body.name.trim()||body.name.length>100||!tagsValid(body.tags))fail(400,'Enter a profile name and valid access tags')
   const id=body.id||randomUUID()
   if(body.id&&!db.prepare('SELECT 1 FROM access_profiles WHERE id=?').get(id))fail(404,'Profile not found')
-  if(id==='service-admin'&&(!body.tags.includes('Service Admin')||body.tags.includes('Read Only')))fail(400,'Keep the built-in recovery profile as a Service Admin without Read Only')
+  if(id==='service-admin'&&(!body.tags.some(t=>['Company Admin','Service Admin'].includes(t))||body.tags.includes('Read Only')))fail(400,'Keep the built-in recovery profile as a Service Admin without Read Only')
   db.prepare('INSERT INTO access_profiles VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,tags=excluded.tags').run(id,body.name.trim(),JSON.stringify(body.tags))
  }else{
   if(!policyResources.some(resource=>resource.id===body.resource)||!body.rule||!tagsValid(body.rule.anyTags)||!tagsValid(body.rule.allTags))fail(400,'Choose a resource and valid policy tags')
-  if(['policies.edit','policies.view'].includes(body.resource)&&(!body.rule.anyTags.includes('Service Admin')||body.rule.allTags.length))fail(400,'Policy management must remain accessible to Service Admin for recovery')
+  if(['policies.edit','policies.view'].includes(body.resource)&&(!body.rule.anyTags.includes('Seacoast Admin')||body.rule.allTags.length))fail(400,'Keep Seacoast Admin policy-management access')
   db.prepare('UPDATE access_rules SET rule=? WHERE resource=?').run(JSON.stringify(body.rule),body.resource)
  }
  db.prepare('INSERT INTO settings_events(entity_id,action,details,created_at) VALUES(?,?,?,?)').run(body.id||body.resource||body.name,path==='/api/classes'?'class_saved':path==='/api/access/profiles'?'access_profile_saved':'access_rule_saved',JSON.stringify(body),now)

@@ -2,6 +2,12 @@
 
 Mobile-first React / Vite application using Bootstrap 6.0.0-alpha.1, Lucide icons, and a local Node/SQLite API.
 
+## Documentation
+
+[User guide and technical reference](docs/EMCore-Inventory-Documentation.html)
+
+A single self-contained HTML page with searchable user help, illustrated workflows, local interactive examples, implementation details, API requests, and the generated SQLite schema. Download the file and open it in a browser; GitHub normally shows HTML source rather than running the page. Styles, scripts, and example screenshots are embedded. Print / PDF prints both guides and expands the schema.
+
 ## Run
 
 Requires Node.js 24.14+.
@@ -143,3 +149,9 @@ Inventory item QR buttons and Item record → Generate / show QR label generate 
 Routes: GET /api/qr?item=<code-or-id>, GET /api/qr/image?item=<code-or-id>, and GET /api/qr/resolve?value=<encoded-QR-or-code>. All require authenticated records.view and medication view access.
 
 QR implementation uses the maintained APIs documented by [node-qrcode](https://github.com/soldair/node-qrcode) and [QR Scanner](https://github.com/nimiq/qr-scanner).
+
+## Role and license matrix
+
+See [Permissions reference](docs/EMCore-Permissions-Reference.html) for the current seven-role matrix, clinical-license restrictions, company lifecycle, storage access, Driver partner verification, and discrepancy approval. This supersedes earlier Service Admin and seal-witness descriptions.
+
+Run `node --test server/*.test.js`, `npm run build`, and `npm run lint` to validate.

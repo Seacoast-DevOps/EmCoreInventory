@@ -32,7 +32,7 @@ export function catalogSnapshot(db,context) {
   const tags = db.prepare('SELECT * FROM medication_tags ORDER BY name').all().map(tag => ({ ...tag, requirements: JSON.parse(tag.requirements) }))
   const links = db.prepare('SELECT * FROM definition_tags').all()
   const definitions = db.prepare('SELECT * FROM drug_definitions ORDER BY name,concentration_value').all().map(drug => ({
-    id: drug.id, name: drug.name, medicationClassId:drug.medication_class_id, accessRules:JSON.parse(drug.access_rules||'{}'), checkIntervalHours: drug.check_interval_hours, sourceNote: drug.source_note, sourceUrl: drug.source_url, concentrationValue: drug.concentration_value, amountUnit: drug.amount_unit,
+    id: drug.id, name: drug.name,minimumLicense:drug.minimum_license,isNarcotic:Boolean(drug.is_narcotic), medicationClassId:drug.medication_class_id, accessRules:JSON.parse(drug.access_rules||'{}'), checkIntervalHours: drug.check_interval_hours, sourceNote: drug.source_note, sourceUrl: drug.source_url, concentrationValue: drug.concentration_value, amountUnit: drug.amount_unit,
     concentrationBasis: drug.concentration_basis, maxAmount: drug.max_amount, form: drug.form,
     hasStock: Boolean(db.prepare('SELECT 1 FROM inventory_items WHERE definition_id=? LIMIT 1').get(drug.id)),
     tagIds: links.filter(link => link.definition_id === drug.id).map(link => link.tag_id),
@@ -53,6 +53,8 @@ export function saveSetting(db, path, body, now) {
     db.prepare('INSERT INTO medication_tags VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,requirements=excluded.requirements')
       .run(id, body.name.trim(), JSON.stringify([...new Set(body.requirements)]))
   } else {
+    if(body.minimumLicense!==undefined&&!['EMT','AEMT','Paramedic'].includes(body.minimumLicense))fail(400,'Choose a minimum medication license')
+    if(body.isNarcotic!==undefined&&typeof body.isNarcotic!=='boolean')fail(400,'Choose whether the medication is narcotic')
     if(body.medicationClassId && (typeof body.medicationClassId!=='string'||!db.prepare('SELECT 1 FROM medication_classes WHERE id=?').get(body.medicationClassId)))fail(400,'Choose a valid medication class')
     if(body.accessRules!==undefined&&!validMedicationRules(body.accessRules))fail(400,'Choose valid medication access rules')
     const interval = body.checkIntervalHours ?? 24
@@ -76,6 +78,8 @@ export function saveSetting(db, path, body, now) {
     db.prepare(`INSERT INTO drug_definitions(id,name,concentration_value,amount_unit,concentration_basis,max_amount,form,check_interval_hours) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,concentration_value=excluded.concentration_value,amount_unit=excluded.amount_unit,concentration_basis=excluded.concentration_basis,max_amount=excluded.max_amount,form=excluded.form,check_interval_hours=excluded.check_interval_hours`)
       .run(id, body.name.trim(), body.concentrationValue, body.amountUnit, body.concentrationBasis, body.maxAmount, body.form, interval)
     db.prepare('UPDATE drug_definitions SET medication_class_id=?,access_rules=? WHERE id=?').run(body.medicationClassId||null,JSON.stringify(body.accessRules||{}),id)
+    const tagNarcotic=body.tagIds.includes('narcotic')
+    db.prepare('UPDATE drug_definitions SET minimum_license=COALESCE(?,minimum_license),is_narcotic=? WHERE id=?').run(body.minimumLicense||null,Number(Boolean(body.isNarcotic??previous?.is_narcotic)||tagNarcotic),id)
     db.prepare('DELETE FROM definition_tags WHERE definition_id=?').run(id)
     for (const tag of body.tagIds) db.prepare('INSERT INTO definition_tags VALUES(?,?)').run(id, tag)
     db.prepare('DELETE FROM par_levels WHERE definition_id=?').run(id)
@@ -90,6 +94,6 @@ export function itemRequirements(db, definitionId) {
 }
 
 export function requireWitness(body, requirements, actions) {
-  const needed = requirements.filter(rule => actions.includes(rule))
+  const needed = requirements.filter(rule => actions.includes(rule)&&!['seal_break','resealed'].includes(rule))
   if (needed.length) requireAuthenticatedWitness(body)
 }

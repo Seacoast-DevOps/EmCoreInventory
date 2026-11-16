@@ -1,3 +1,6 @@
+import {migrateMatrix,authorizeStorage,discrepancies,saveDiscrepancy,saveSeal,purgeOperational} from './matrix.js'
+import {storageAllowed,needsPartner} from '../shared/matrix-rules.js'
+import {requireAuthenticatedWitness} from './witness.js'
 import QRCode from 'qrcode'
 import {migrateWitnesses,attachWitness} from './witness.js'
 import {qrValue,parseQr} from '../shared/qr.js'
@@ -5,7 +8,7 @@ import { createServer } from 'node:http'
 
 import { DatabaseSync } from 'node:sqlite'
 
-import { mkdirSync } from 'node:fs'
+import { existsSync,mkdirSync } from 'node:fs'
 
 import { dirname,join } from 'node:path'
 
@@ -47,7 +50,7 @@ function authorizeRequest(db,context,path,body){
 
  const itemFor=id=>typeof id==='string'?db.prepare('SELECT * FROM inventory_items WHERE id=?').get(id):null
 
- const checkDrug=(item,action)=>{if(item){authorizeMedication(context,drugForItem(db,item),'view');authorizeMedication(context,drugForItem(db,item),action)}}
+ const checkDrug=(item,action)=>{if(item){authorizeStorage(db,context,item.box_id);authorizeMedication(context,drugForItem(db,item),'view');authorizeMedication(context,drugForItem(db,item),action)}}
 
  if(path==='/api/classes')authorize(context,'classes.edit')
 
@@ -61,11 +64,13 @@ function authorizeRequest(db,context,path,body){
 
  else if(path==='/api/drugs'){authorize(context,'stock.create');if(body.boxId&&body.boxId!=='unassigned')authorize(context,'inventory.transfer');const drug=catalogSnapshot(db).definitions.find(drug=>drug.id===body.definitionId);if(drug){authorizeMedication(context,drug,'view');authorizeMedication(context,drug,'create')}}
 
- else if(path==='/api/move'){authorize(context,'inventory.view');authorize(context,'inventory.transfer');checkDrug(itemFor(body.itemId),'transfer')}
+ else if(path==='/api/seals'){authorize(context,'seals.'+(body.action==='break'?'break':'reseal'));authorizeStorage(db,context,body.boxId)}
+ else if(path.startsWith('/api/discrepancies')){authorize(context,path.endsWith('/approve')?'discrepancies.approve':'discrepancies.report')}
+ else if(path==='/api/move'){authorizeStorage(db,context,body.destinationId);authorize(context,'inventory.view');authorize(context,'inventory.transfer');checkDrug(itemFor(body.itemId),'transfer')}
 
  else if(path==='/api/verify'||path.startsWith('/api/checks/')){
 
-  authorize(context,'inventory.view')
+  authorize(context,'inventory.view');if(body.boxId)authorizeStorage(db,context,body.boxId)
 
   const action=path==='/api/verify'?'verify':path.split('/').at(-1)
 
@@ -89,7 +94,7 @@ function authorizeRequest(db,context,path,body){
 
   const entries=[...(Array.isArray(body.items)?body.items:[]),...(Number.isInteger(body.id)?db.prepare('SELECT item_id id,wasted FROM incident_allocations WHERE incident_id=?').all(body.id):[])]
 
-  for(const entry of entries){const item=itemFor(entry?.id);checkDrug(item,body.id?'edit':'view');if(!draft){if(body.reason==='used'){authorize(context,'medications.administer');checkDrug(item,'administer')}if(!['used','opened'].includes(body.reason)||Number(entry?.wasted)>0){authorize(context,'medications.waste');checkDrug(item,'waste')}}}
+  for(const entry of entries){const item=itemFor(entry?.id);checkDrug(item,body.id?'edit':'view');if(!draft){if(['used','opened'].includes(body.reason)){authorize(context,'medications.administer');checkDrug(item,'administer')}if(!['used','opened'].includes(body.reason)||Number(entry?.wasted)>0){authorize(context,'medications.waste');checkDrug(item,'waste')}}}
 
  }
 
@@ -112,6 +117,7 @@ export function createInventoryServer(db, options={}) {
 
   migratePermissions(db)
   migrateWitnesses(db)
+  migrateMatrix(db)
 
   const identityDb=options.identityDb||db
 
@@ -123,17 +129,19 @@ export function createInventoryServer(db, options={}) {
 
   const snapshot = (context) => ({
 
-    boxes: db.prepare('SELECT * FROM inventory_boxes').all(),
+    boxes: db.prepare('SELECT * FROM inventory_boxes').all().filter(box=>!context||storageAllowed(context.profile,box)),
+    managedBoxes:context?.permissions['containers.view']?db.prepare('SELECT * FROM inventory_boxes').all():[],
+    discrepancies:context?.permissions['discrepancies.view']?discrepancies(db,context):[],
 
-    items: db.prepare("SELECT * FROM inventory_items WHERE status IN ('available','opened','unassigned') ORDER BY medication,code").all().map(item => ({ ...item, requirements: itemRequirements(db, item.definition_id), tagNames: item.definition_id ? db.prepare('SELECT name FROM medication_tags JOIN definition_tags ON tag_id=medication_tags.id WHERE definition_id=?').all(item.definition_id).map(tag => tag.name) : [] })).filter(item=>!context||(item.box_id==='unassigned'?context.permissions['stock.view']:context.permissions['inventory.view'])&&medicationPermitted(context.profile,drugForItem(db,item),'view')),
+    items: db.prepare("SELECT * FROM inventory_items WHERE status IN ('available','opened','unassigned') ORDER BY medication,code").all().map(item => ({ ...item, requirements: itemRequirements(db, item.definition_id), tagNames: item.definition_id ? db.prepare('SELECT name FROM medication_tags JOIN definition_tags ON tag_id=medication_tags.id WHERE definition_id=?').all(item.definition_id).map(tag => tag.name) : [] })).filter(item=>!context||storageAllowed(context.profile,db.prepare('SELECT * FROM inventory_boxes WHERE id=?').get(item.box_id))&&(item.box_id==='unassigned'?context.permissions['stock.view']:context.permissions['inventory.view'])&&medicationPermitted(context.profile,drugForItem(db,item),'view')),
 
     ...catalogSnapshot(db,context),
 
     classes:db.prepare('SELECT * FROM medication_classes ORDER BY name').all(),
 
-    checks: context&&!context.permissions['inventory.view']?[]:checkSnapshot(db),
+    checks: context&&!context.permissions['inventory.view']?[]:checkSnapshot(db).filter(check=>!context||storageAllowed(context.profile,db.prepare('SELECT * FROM inventory_boxes WHERE id=?').get(check.boxId))),
 
-    incidents: context&&!context.permissions['incidents.view']?[]:db.prepare(`SELECT i.*, (SELECT count(*) FROM incident_items WHERE incident_id=i.id) AS item_count FROM incidents i ORDER BY i.id DESC`).all().filter(record=>!context||[...new Set([...(record.payload?JSON.parse(record.payload).items.map(item=>item.id):[]),...db.prepare('SELECT item_id FROM incident_items WHERE incident_id=?').all(record.id).map(row=>row.item_id)])].every(id=>{const item=db.prepare('SELECT * FROM inventory_items WHERE id=?').get(id);return !item||medicationPermitted(context.profile,drugForItem(db,item),'view')})),
+    incidents: context&&!context.permissions['incidents.view']?[]:db.prepare(`SELECT i.*, (SELECT count(*) FROM incident_items WHERE incident_id=i.id) AS item_count FROM incidents i ORDER BY i.id DESC`).all().filter(record=>!context||[...new Set([...(record.payload?JSON.parse(record.payload).items.map(item=>item.id):[]),...db.prepare('SELECT item_id FROM incident_items WHERE incident_id=?').all(record.id).map(row=>row.item_id)])].every(id=>{const item=db.prepare('SELECT * FROM inventory_items WHERE id=?').get(id);return !item||storageAllowed(context.profile,db.prepare('SELECT * FROM inventory_boxes WHERE id=?').get(item.box_id))&&medicationPermitted(context.profile,drugForItem(db,item),'view')})),
 
   })
 
@@ -183,6 +191,7 @@ export function createInventoryServer(db, options={}) {
 
     }
 
+    if(sealed.length&&needsPartner(body.operatorProfile))requireAuthenticatedWitness(body)
     for (const box of sealed) {
 
       const requirements = db.prepare("SELECT definition_id FROM inventory_items WHERE box_id=? AND status IN ('available','opened')").all(box.id).flatMap(item => itemRequirements(db, item.definition_id))
@@ -197,7 +206,7 @@ export function createInventoryServer(db, options={}) {
 
       for (const item of db.prepare("SELECT id FROM inventory_items WHERE box_id=? AND status IN ('available','opened')").all(box.id)) {
 
-        event(item.id, 'seal_broken', box.id, box.id, { seal: box.seal, witness: body.witness?.trim() || null }, now)
+        event(item.id, 'seal_broken', box.id, box.id, { seal: box.seal, witness: body.witness?.trim() || null,incidentNumber:body.incidentNumber||null }, now)
 
       }
 
@@ -225,12 +234,20 @@ export function createInventoryServer(db, options={}) {
 
       const readBody=async()=>{let text='';for await(const part of req){text+=part;if(text.length>65536)fail(413,'Request too large')}let body;try{body=JSON.parse(text)}catch{fail(400,'Invalid JSON')}if(!body||typeof body!=='object'||Array.isArray(body))fail(400,'Invalid request');return body}
 
-      if(await authRoute(identityDb,req,res,url,readBody))return
+      if(await authRoute(identityDb,req,res,url,readBody,{purgeCompany:async id=>{
+        let target=id==='primary'?db:tenantServers.get(id)?.db
+        let temporary=false
+        if(!target){const file=db.prepare('PRAGMA database_list').all().find(row=>row.name==='main').file;if(!file)return;const path=join(dirname(file),'service-'+id+'.sqlite');if(!existsSync(path))return;target=new DatabaseSync(path);target.exec('PRAGMA foreign_keys=ON');temporary=true}
+        target.exec('BEGIN IMMEDIATE');try{purgeOperational(target);target.exec('COMMIT')}catch(error){target.exec('ROLLBACK');throw error}
+        target.exec('VACUUM')
+        if(id!=='primary'){const cached=tenantServers.get(id);if(cached){cached.server.close();tenantServers.delete(id)}target.close()}else if(temporary)target.close()
+      }}))return
 
       if(url.pathname==='/api/health'&&req.method==='GET')return send(200,{status:'ok',database:'sqlite'})
 
       const user=sessionContext(identityDb,req)
 
+      if(user.platformOnly||user.companyActive===0){if(url.pathname==='/api/access')return send(200,accessSnapshot(db,accessContext(db,'service-admin',user)));fail(403,'Select an active company for inventory operations')}
       if(user.serviceId!==serviceId){
 
         if(options.identityDb)fail(403,'Service mismatch')
@@ -263,6 +280,7 @@ export function createInventoryServer(db, options={}) {
 
         if (url.pathname === '/api/access') return send(200,accessSnapshot(db,context))
 
+        if(url.pathname==='/api/discrepancies'){authorize(context,'discrepancies.view');return send(200,{entries:discrepancies(db,context)})}
         if (url.pathname === '/api/logs') {authorize(context,'logs.view');return send(200,logs(db,url.searchParams,identityDb,user.serviceId))}
 
         if (url.pathname === '/api/health') return send(200, { status: 'ok', database: 'sqlite' })
@@ -278,7 +296,7 @@ export function createInventoryServer(db, options={}) {
           if(!textField(identity,80))fail(400,'Enter an item code')
           const item=db.prepare('SELECT * FROM inventory_items WHERE code=? OR id=?').get(identity,identity)
           if(!item||parsed?.itemId&&parsed.itemId!==item.id)fail(404,'No matching vial exists in the current service')
-          authorizeMedication(context,drugForItem(db,item),'view')
+          authorizeStorage(db,context,item.box_id);authorizeMedication(context,drugForItem(db,item),'view')
           const box=db.prepare('SELECT location,name FROM inventory_boxes WHERE id=?').get(item.box_id)
           if(url.pathname==='/api/qr/image'){
             const png=await QRCode.toBuffer(qrValue(context.user.serviceId,item),{width:512,margin:4,errorCorrectionLevel:'M'})
@@ -290,12 +308,13 @@ export function createInventoryServer(db, options={}) {
 
         if (url.pathname === '/api/vials') {authorize(context,'inventory.view');return send(200, snapshot(context).items)}
 
-        if (url.pathname === '/api/incident') {authorize(context,'incidents.view');const record=incidentRecord(db,Number(url.searchParams.get('id')));for(const item of record.items)authorizeMedication(context,drugForItem(db,item),'view');return send(200,record)}
+        if (url.pathname === '/api/incident') {authorize(context,'incidents.view');const record=incidentRecord(db,Number(url.searchParams.get('id')));for(const item of record.items){authorizeStorage(db,context,item.box_id);authorizeMedication(context,drugForItem(db,item),'view');}return send(200,record)}
 
         if(url.pathname==='/api/checks'){
 
           authorize(context,'inventory.view')
 
+          authorizeStorage(db,context,url.searchParams.get('boxId'))
           const records=db.prepare('SELECT * FROM drug_checks WHERE box_id=? ORDER BY created_at DESC,rowid DESC').all(url.searchParams.get('boxId')).map(check=>{const items=JSON.parse(check.item_ids).map(id=>db.prepare('SELECT * FROM inventory_items WHERE id=?').get(id)).filter(Boolean);for(const item of items)authorizeMedication(context,drugForItem(db,item),'view');return {...check,items:items.map(item=>({id:item.id,code:item.code,medication:item.medication})),checkedIds:JSON.parse(check.checked_ids)}})
 
           return send(200,records)
@@ -314,7 +333,7 @@ export function createInventoryServer(db, options={}) {
 
           if (!item) fail(404, 'Item not found')
 
-          authorizeMedication(context,drugForItem(db,item),'view')
+          authorizeStorage(db,context,item.box_id);authorizeMedication(context,drugForItem(db,item),'view')
 
           return send(200, { item, events: db.prepare('SELECT * FROM inventory_events WHERE item_id=? ORDER BY id DESC').all(item.id) })
 
@@ -324,7 +343,7 @@ export function createInventoryServer(db, options={}) {
 
       }
 
-      if (req.method !== 'POST' || !['/api/verify', '/api/move', '/api/drugs', '/api/incidents', '/api/tags', '/api/definitions','/api/containers','/api/incidents/draft','/api/incidents/reopen','/api/checks/start','/api/checks/verify','/api/checks/save','/api/checks/complete','/api/classes','/api/access/profiles','/api/access/rules'].includes(url.pathname)) fail(404, 'Not found')
+      if (req.method !== 'POST' || !['/api/verify', '/api/move', '/api/drugs', '/api/incidents', '/api/tags', '/api/definitions','/api/containers','/api/incidents/draft','/api/incidents/reopen','/api/checks/start','/api/checks/verify','/api/checks/save','/api/checks/complete','/api/classes','/api/access/profiles','/api/access/rules','/api/seals','/api/discrepancies','/api/discrepancies/approve'].includes(url.pathname)) fail(404, 'Not found')
 
       const body=await readBody()
       attachWitness({db,identityDb,context,req,path:url.pathname,body})
@@ -343,7 +362,9 @@ export function createInventoryServer(db, options={}) {
 
         const now = new Date().toISOString()
 
-        if (['/api/classes','/api/access/profiles','/api/access/rules'].includes(url.pathname)) {saveAccess(db,url.pathname,body,now)
+        if(url.pathname==='/api/seals'){if(body.action==='break'&&needsPartner(context.profile))requireAuthenticatedWitness(body);saveSeal(db,body,context,now,event,breakSeals)
+        }else if(url.pathname.startsWith('/api/discrepancies')){saveDiscrepancy(db,url.pathname,body,context,now,event)
+        }else if (['/api/classes','/api/access/profiles','/api/access/rules','/api/seals','/api/discrepancies','/api/discrepancies/approve'].includes(url.pathname)) {saveAccess(db,url.pathname,body,now)
 
         } else if (url.pathname.startsWith('/api/checks/')) {
 
