@@ -10,6 +10,8 @@ internal sealed partial class InventoryOperation
 {
     internal void SaveContainer()
     {
+        AccessService.Authorize(access, "containers.edit");
+        Require(body.Text("id") != "unassigned", "Unassigned is a fixed staging area");
         if (body.ContainsKey("allowedRoles"))
         {
             var roles = body["allowedRoles"] is JsonArray array ? array.Select(x => x is JsonValue value && value.TryGetValue<string>(out var role) ? role : "").ToArray() : [];
@@ -43,14 +45,14 @@ internal sealed partial class InventoryOperation
         Setting(box.Id, "container_saved");
     }
 
-    internal void SaveSeal()
+    internal void SaveSeal(SealRequest request)
     {
+        AccessService.Authorize(access, request.Action == SealAction.Break ? "seals.break" : "seals.reseal");
         var box = AccessService.AuthorizeStorage(db, access, body.Text("boxId"));
         Require(box.Id != "unassigned", "Unassigned has no physical seal");
-        var action = body.Text("action");
-        Require(action is "break" or "reseal", "Choose break or reseal");
+        var breaking = request.Action == SealAction.Break;
         Require(!body.ContainsKey("incidentNumber") || body.OptionalText("incidentNumber") is { Length: <= 60 }, "Invalid incident number");
-        if (action == "break")
+        if (breaking)
         {
             Require(box.Sealed != 0, "This container is already unsealed", 409);
             if (access.User.LicenseLevel == "Driver") witness.Require();
@@ -66,35 +68,39 @@ internal sealed partial class InventoryOperation
             box.Sealed = 1; box.Seal = body.Text("seal").Trim(); box.StockRevision++;
             foreach (var item in items) Event(item.Id, "container_resealed", box.Id, box.Id, new { seal = box.Seal, incidentNumber = body.Text("incidentNumber"), witness = body.OptionalText("witness") });
         }
-        Setting(box.Id, action == "break" ? "seal_broken" : "container_resealed");
+        Setting(box.Id, breaking ? "seal_broken" : "container_resealed");
     }
 
-    internal void SaveDiscrepancy(string path)
+    internal void ApproveDiscrepancy()
     {
-        if (path.EndsWith("/approve"))
+        AccessService.Authorize(access, "discrepancies.approve");
+        var row = db.Discrepancies.Find(body.Text("id")) ?? throw new ApiException(404, "Discrepancy not found");
+        AccessService.AuthorizeStorage(db, access, row.BoxId);
+        if (row.BoxId == "unassigned") AccessService.Authorize(access, "stock.view");
+        if (row.ItemId is not null) InventoryQueries.AuthorizeItem(db, access, Item(row.ItemId, requireActive: false));
+        Require(row.Status == DiscrepancyStatus.Open && row.Revision == body.Integer("revision"), "This discrepancy changed. Refresh before approving.", 409);
+        Require(body.OptionalText("resolution") is { Length: > 0 and <= 1000 } && !string.IsNullOrWhiteSpace(body.Text("resolution")), "Enter an approval / resolution note");
+        row.Status = DiscrepancyStatus.Approved; row.ApprovedBy = access.User.Actor; row.ApprovedAt = now; row.Resolution = body.Text("resolution").Trim(); row.Revision++;
+        if (row.ItemId is not null) Event(row.ItemId, "discrepancy_approved", row.BoxId, row.BoxId, new { discrepancyId = row.Id, resolution = row.Resolution });
+        Setting(row.Id, "discrepancy_approved");
+    }
+
+    internal void ReportDiscrepancy()
+    {
+        AccessService.Authorize(access, "discrepancies.report");
+        var box = AccessService.AuthorizeStorage(db, access, body.Text("boxId"));
+        if (box.Id == "unassigned") AccessService.Authorize(access, "stock.view");
+        Require(body.OptionalText("notes") is { Length: > 0 and <= 1000 } && !string.IsNullOrWhiteSpace(body.Text("notes")), "Describe the discrepancy in up to 1,000 characters");
+        InventoryItem? item = null;
+        if (!string.IsNullOrEmpty(body.Text("itemCode")))
         {
-            var row = db.Discrepancies.Find(body.Text("id")) ?? throw new ApiException(404, "Discrepancy not found");
-            AccessService.AuthorizeStorage(db, access, row.BoxId);
-            Require(row.Status == "open" && row.Revision == body.Integer("revision"), "This discrepancy changed. Refresh before approving.", 409);
-            Require(body.OptionalText("resolution") is { Length: > 0 and <= 1000 } && !string.IsNullOrWhiteSpace(body.Text("resolution")), "Enter an approval / resolution note");
-            row.Status = "approved"; row.ApprovedBy = access.User.Actor; row.ApprovedAt = now; row.Resolution = body.Text("resolution").Trim(); row.Revision++;
-            if (row.ItemId is not null) Event(row.ItemId, "discrepancy_approved", row.BoxId, row.BoxId, new { discrepancyId = row.Id, resolution = row.Resolution });
+            var code = body.Text("itemCode").Trim().ToUpperInvariant();
+            item = db.InventoryItems.FirstOrDefault(x => x.Code == code && x.BoxId == box.Id);
+            Require(item is not null && InventoryQueries.Visible(db, access, item), "That item code does not belong to a visible item in this container");
         }
-        else
-        {
-            var box = AccessService.AuthorizeStorage(db, access, body.Text("boxId"));
-            Require(body.OptionalText("notes") is { Length: > 0 and <= 1000 } && !string.IsNullOrWhiteSpace(body.Text("notes")), "Describe the discrepancy in up to 1,000 characters");
-            InventoryItem? item = null;
-            if (!string.IsNullOrEmpty(body.Text("itemCode")))
-            {
-                var code = body.Text("itemCode").Trim().ToUpperInvariant();
-                item = db.InventoryItems.FirstOrDefault(x => x.Code == code && x.BoxId == box.Id);
-                Require(item is not null, "That item code does not belong to this container");
-            }
-            var row = new Discrepancy { Id = Guid.NewGuid().ToString(), BoxId = box.Id, ItemId = item?.Id, Notes = body.Text("notes").Trim(), ReportedBy = access.User.Actor, ReportedAt = now, Status = "open", Resolution = "", Revision = 1 };
-            db.Discrepancies.Add(row);
-            if (item is not null) Event(item.Id, "discrepancy_reported", box.Id, box.Id, new { discrepancyId = row.Id, notes = row.Notes });
-        }
-        Setting(body.OptionalText("id") ?? body.Text("boxId"), path.EndsWith("/approve") ? "discrepancy_approved" : "discrepancy_reported");
+        var row = new Discrepancy { Id = Guid.NewGuid().ToString(), BoxId = box.Id, ItemId = item?.Id, Notes = body.Text("notes").Trim(), ReportedBy = access.User.Actor, ReportedAt = now, Status = DiscrepancyStatus.Open, Resolution = "", Revision = 1 };
+        db.Discrepancies.Add(row);
+        if (item is not null) Event(item.Id, "discrepancy_reported", box.Id, box.Id, new { discrepancyId = row.Id, notes = row.Notes });
+        Setting(box.Id, "discrepancy_reported");
     }
 }

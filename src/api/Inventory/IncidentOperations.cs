@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using EmCoreInventory.Api.Authorization;
 using EmCoreInventory.Api.Common;
 using EmCoreInventory.Api.Data;
 using static EmCoreInventory.Api.Inventory.InventoryJson;
@@ -17,6 +18,9 @@ internal sealed partial class InventoryOperation
 
     internal int SaveIncident(bool draftOnly)
     {
+        AccessService.Authorize(access, "incidents.view");
+        var updating = body.ContainsKey("id");
+        AccessService.Authorize(access, updating ? "incidents.edit" : "incidents.create");
         Incident? previous = null;
         Require(!body.ContainsKey("clientKey") || body.OptionalText("clientKey") is { Length: > 0 and <= 100 }, "Invalid incident client key");
         var clientKey = body.OptionalText("clientKey");
@@ -26,7 +30,8 @@ internal sealed partial class InventoryOperation
             Require(body.Integer("id") > 0, "Choose a valid incident");
             previous = db.Incidents.Find(body.Integer("id")) ?? throw new ApiException(404, "Incident not found");
             Require(previous.Revision == body.Integer("revision"), "This incident changed elsewhere. Reload it before editing.", 409);
-            Require(previous.Status != "completed", "Reopen this incident before editing it", 409);
+            Require(previous.Status != IncidentStatus.Completed, "Reopen this incident before editing it", 409);
+            IncidentQueries.AuthorizedRecord(db, access, previous.Id);
         }
         var entries = body.Entries("items").ToList();
         Require(body["items"] is JsonArray items && items.Count == entries.Count && items.Count <= 100 && entries.Select(x => x.Text("id")).Distinct().Count() == items.Count, "Choose up to 100 different items");
@@ -39,13 +44,31 @@ internal sealed partial class InventoryOperation
         Require(draftOnly || reason != "used" || !string.IsNullOrWhiteSpace(body.Text("incidentNumber")), "Enter the incident number for used medication");
         Require(draftOnly || reason != "other" || !string.IsNullOrWhiteSpace(body.Text("notes")), "Explain the disposal reason");
         var old = previous is null ? [] : db.IncidentAllocations.Where(x => x.IncidentId == previous.Id).ToList();
+        var administered = reason is "used" or "opened";
+        foreach (var entry in entries.Select(x => (Id: x.Text("id"), Wasted: x.Number("wasted", 0)))
+                     .Concat(old.Select(x => (Id: x.ItemId, x.Wasted))))
+        {
+            var item = db.InventoryItems.Find(entry.Id);
+            AuthorizeDrug(item, updating ? "edit" : "view");
+            if (draftOnly) continue;
+            if (administered)
+            {
+                AccessService.Authorize(access, "medications.administer");
+                AuthorizeDrug(item, "administer");
+            }
+            if (!administered || entry.Wasted > 0)
+            {
+                AccessService.Authorize(access, "medications.waste");
+                AuthorizeDrug(item, "waste");
+            }
+        }
         Require(draftOnly || previous is null || !db.IncidentVersions.Any(x => x.IncidentId == previous.Id && x.Status == "completed") || !string.IsNullOrWhiteSpace(body.Text("correctionNote")), "Enter a correction reason for the reopened incident");
         var validated = new List<Dose>();
         foreach (var entry in entries)
         {
             var item = db.InventoryItems.Find(entry.Text("id")) ?? throw new ApiException(400, "An incident item no longer exists");
             var allocation = old.Find(x => x.ItemId == item.Id);
-            Require(allocation is not null || ActiveStatuses.Contains(item.Status) && entry.Text("boxId") == item.BoxId, "An item is unavailable or moved. Remove it and select it again.", 409);
+            Require(allocation is not null || item.Status is (InventoryItemStatus.Available or InventoryItemStatus.Opened) && entry.Text("boxId") == item.BoxId, "An item is unavailable or moved. Remove it and select it again.", 409);
             if (draftOnly) { validated.Add(new Dose(item, entry["given"]?.DeepClone() ?? JsonValue.Create(""), entry["wasted"]?.DeepClone() ?? JsonValue.Create(""), 0, 0)); continue; }
             double? available = item.RemainingAmount + (allocation?.Given ?? 0) + (allocation?.Wasted ?? 0);
             Require(reason == "opened" || available is not null, "Complete the drug profile before recording quantities for " + item.Code);
@@ -86,12 +109,12 @@ internal sealed partial class InventoryOperation
         incident.Reason = reason;
         incident.Notes = body.Text("notes");
         incident.Payload = payload.ToJsonString();
-        incident.Status = draftOnly ? old.Count > 0 ? "reopened" : "draft" : "completed";
+        incident.Status = draftOnly ? old.Count > 0 ? IncidentStatus.Reopened : IncidentStatus.Draft : IncidentStatus.Completed;
         incident.Revision++;
         incident.UpdatedAt = now;
         if (previous is null) db.Incidents.Add(incident);
         db.SaveChanges();
-        db.IncidentVersions.Add(new IncidentVersion { IncidentId = incident.Id, Revision = incident.Revision, Status = incident.Status, Payload = incident.Payload, CreatedAt = now });
+        db.IncidentVersions.Add(new IncidentVersion { IncidentId = incident.Id, Revision = incident.Revision, Status = StatusNames.Format(incident.Status), Payload = incident.Payload, CreatedAt = now });
         if (!draftOnly)
         {
             foreach (var id in old.Select(x => x.ItemId).Concat(validated.Select(x => x.Item.Id)).Distinct())
@@ -101,7 +124,7 @@ internal sealed partial class InventoryOperation
                 var after = validated.Find(x => x.Item.Id == id);
                 var difference = (after is null ? 0 : after.Given + after.Wasted) - (before is null ? 0 : before.Given + before.Wasted);
                 item.RemainingAmount = item.RemainingAmount is null ? null : Math.Max(0, Math.Round(item.RemainingAmount.Value - difference, 9));
-                item.Status = item.RemainingAmount == 0 ? after?.Given > 0 ? "used" : "disposed" : "opened";
+                item.Status = item.RemainingAmount == 0 ? after?.Given > 0 ? InventoryItemStatus.Used : InventoryItemStatus.Disposed : InventoryItemStatus.Opened;
                 item.WasOpened = 1;
                 item.VerifiedAt = null;
                 if (difference != 0 || before is null) Box(item.BoxId).StockRevision++;
@@ -125,21 +148,27 @@ internal sealed partial class InventoryOperation
     }
     internal void ReopenIncident()
     {
+        AccessService.Authorize(access, "incidents.view");
+        AccessService.Authorize(access, "incidents.reopen");
         var incident = db.Incidents.Find(body.Integer("id"));
-        Require(incident is not null && incident.Status == "completed" && incident.Revision == body.Integer("revision"), "Only the current completed incident can be reopened. Reload and try again.", 409);
-        incident!.Status = "reopened";
+        Require(incident is not null && incident.Status == IncidentStatus.Completed && incident.Revision == body.Integer("revision"), "Only the current completed incident can be reopened. Reload and try again.", 409);
+        IncidentQueries.AuthorizedRecord(db, access, incident!.Id);
+        var itemIds = db.IncidentItems.Where(x => x.IncidentId == incident.Id).Select(x => x.ItemId).ToList();
+        foreach (var itemId in itemIds) AuthorizeDrug(db.InventoryItems.Find(itemId), "edit");
+        incident!.Status = IncidentStatus.Reopened;
         incident.Revision++;
         incident.UpdatedAt = now;
-        foreach (var itemId in db.IncidentItems.Where(x => x.IncidentId == incident.Id).Select(x => x.ItemId).ToList())
+        foreach (var itemId in itemIds)
             Event(itemId, "incident_reopened", null, null, new { incidentId = incident.Id, revision = incident.Revision });
-        db.IncidentVersions.Add(new IncidentVersion { IncidentId = incident.Id, Revision = incident.Revision, Status = "reopened", Payload = incident.Payload ?? "{}", CreatedAt = now });
+        db.IncidentVersions.Add(new IncidentVersion { IncidentId = incident.Id, Revision = incident.Revision, Status = StatusNames.Format(incident.Status), Payload = incident.Payload ?? "{}", CreatedAt = now });
     }
 }
 
 internal static class IncidentQueries
 {
-    internal static JsonObject Record(InventoryDbContext db, int id)
+    internal static JsonObject AuthorizedRecord(InventoryDbContext db, AccessContext access, int id)
     {
+        AccessService.Authorize(access, "incidents.view");
         var incident = db.Incidents.Find(id) ?? throw new ApiException(404, "Incident not found");
         var rows = (from link in db.IncidentItems join item in db.InventoryItems on link.ItemId equals item.Id where link.IncidentId == id select item).ToList();
         var allocations = db.IncidentAllocations.Where(x => x.IncidentId == id).ToList();
@@ -149,9 +178,14 @@ internal static class IncidentQueries
             ["items"] = new JsonArray(rows.Select(item => (JsonNode)new JsonObject { ["id"] = item.Id, ["boxId"] = item.BoxId, ["given"] = allocations.Find(x => x.ItemId == item.Id)?.Given, ["wasted"] = allocations.Find(x => x.ItemId == item.Id)?.Wasted }).ToArray())
         };
         var versions = db.IncidentVersions.Where(x => x.IncidentId == id).OrderByDescending(x => x.Revision).ThenByDescending(x => x.Id).ToList();
-        var ids = payload.Entries("items").Select(x => x.Text("id")).Concat(rows.Select(x => x.Id)).Concat(versions.SelectMany(x => Object(x.Payload).Entries("items").Select(v => v.Text("id")))).Distinct().ToArray();
+        var ids = payload.Entries("items").Select(x => x.Text("id"))
+            .Concat(rows.Select(x => x.Id))
+            .Concat(allocations.Select(x => x.ItemId))
+            .Concat(versions.SelectMany(x => Object(x.Payload).Entries("items").Select(v => v.Text("id"))))
+            .Distinct().ToArray();
         var items = db.InventoryItems.Where(x => ids.Contains(x.Id)).ToList().Select(item =>
         {
+            InventoryQueries.AuthorizeItem(db, access, item);
             var row = Row(item);
             var requirements = (from link in db.DefinitionTags join tag in db.MedicationTags on link.TagId equals tag.Id where link.DefinitionId == item.DefinitionId select tag.Requirements).ToList().SelectMany(Strings).Distinct();
             row["requirements"] = Array(requirements);

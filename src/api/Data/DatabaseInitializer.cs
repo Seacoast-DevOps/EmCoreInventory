@@ -31,10 +31,9 @@ public static class DatabaseInitializer
         new("dextrose", "Dextrose 10%", "", 0.1, "g", "mL", 25, "Premixed bag", "250 mL · Premixed bag")
     ];
 
-    public static void Initialize(InventoryDbContext db, bool identity, bool freshTenant)
+    internal static void Seed(InventoryDbContext db)
     {
-        if (!db.Database.EnsureCreated()) LegacySchemaUpgrade.Apply(db);
-        using var transaction = db.Database.BeginTransaction();
+        var freshTenant = !db.IsIdentity;
         var seeds = db.InventorySeeds.Select(seed => seed.Version).ToHashSet();
         var now = DateTimeOffset.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
         if (!seeds.Contains(1))
@@ -60,7 +59,7 @@ public static class DatabaseInitializer
         MigrateAmountsAndIncidents(db);
         if (!seeds.Contains(4))
         {
-            foreach (var item in db.InventoryItems.Where(item => item.Status == "opened")) item.WasOpened = 1;
+            foreach (var item in db.InventoryItems.Where(item => item.Status == InventoryItemStatus.Opened)) item.WasOpened = 1;
             db.InventorySeeds.Add(new InventorySeed { Version = 4 });
         }
         if (!db.InventoryBoxes.Any(box => box.Id == "unassigned"))
@@ -73,8 +72,7 @@ public static class DatabaseInitializer
             db.InventorySeeds.Add(new InventorySeed { Version = 5 });
             db.SaveChanges();
         }
-        if (identity) IdentityService.Initialize(db);
-        transaction.Commit();
+        if (db.IsIdentity) IdentityService.Initialize(db);
         db.ChangeTracker.Clear();
     }
 
@@ -173,7 +171,7 @@ public static class DatabaseInitializer
                 item.DefinitionSnapshot = Serialize(snapshot);
                 item.Presentation = string.Create(CultureInfo.InvariantCulture, $"{definition.ConcentrationValue} {definition.AmountUnit}/{definition.ConcentrationBasis} · {definition.MaxAmount} {definition.AmountUnit} per {definition.Form.ToLowerInvariant()}");
                 item.AmountTotal = definition.MaxAmount;
-                item.RemainingAmount = item.Status is "available" or "opened" ? definition.MaxAmount : 0;
+                item.RemainingAmount = item.Status is InventoryItemStatus.Available or InventoryItemStatus.Opened ? definition.MaxAmount : 0;
                 db.InventoryEvents.Add(new InventoryEvent
                 {
                     ItemId = item.Id, Action = "standardized", FromBox = item.BoxId, ToBox = item.BoxId,
@@ -184,7 +182,7 @@ public static class DatabaseInitializer
             var targets = templatesOnly
                 ? Containers().SelectMany(box => box.Stock.Where(stock => stock.Medication.Key == medication.Key)
                     .Select(stock => new { BoxId = box.Id, Target = stock.Quantity })).ToList()
-                : db.InventoryItems.Where(item => item.DefinitionId == definition.Id && (item.Status == "available" || item.Status == "opened"))
+                : db.InventoryItems.Where(item => item.DefinitionId == definition.Id && (item.Status == InventoryItemStatus.Available || item.Status == InventoryItemStatus.Opened))
                     .GroupBy(item => item.BoxId).Select(group => new { BoxId = group.Key, Target = group.Count() }).ToList();
             foreach (var target in targets)
                 if (!db.ParLevels.Any(par => par.DefinitionId == definition.Id && par.BoxId == target.BoxId))
@@ -206,7 +204,7 @@ public static class DatabaseInitializer
             if (definitions.TryGetValue(item.DefinitionId!, out var definition))
             {
                 item.AmountTotal = definition.MaxAmount;
-                item.RemainingAmount = item.Status is "available" or "opened" ? definition.MaxAmount : 0;
+                item.RemainingAmount = item.Status is InventoryItemStatus.Available or InventoryItemStatus.Opened ? definition.MaxAmount : 0;
             }
         db.SaveChanges();
         foreach (var incident in db.Incidents.Where(incident => incident.Payload == null).ToList())

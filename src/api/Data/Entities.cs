@@ -43,7 +43,7 @@ public sealed class InventoryItem
     [JsonPropertyName("code")]
     public string? Code { get; set; }
     [JsonPropertyName("status")]
-    public string Status { get; set; } = "available";
+    public InventoryItemStatus Status { get; set; } = InventoryItemStatus.Available;
     [JsonPropertyName("received_at")]
     public string? ReceivedAt { get; set; }
     [JsonPropertyName("external_source")]
@@ -109,7 +109,7 @@ public sealed class Incident
     [JsonPropertyName("created_at")]
     public string CreatedAt { get; set; } = "";
     [JsonPropertyName("status")]
-    public string Status { get; set; } = "completed";
+    public IncidentStatus Status { get; set; } = IncidentStatus.Completed;
     [JsonPropertyName("revision")]
     public int Revision { get; set; } = 1;
     [JsonPropertyName("payload")]
@@ -251,7 +251,7 @@ public sealed class DrugCheck
     [JsonPropertyName("box_id")]
     public string BoxId { get; set; } = "";
     [JsonPropertyName("status")]
-    public string Status { get; set; } = "";
+    public required DrugCheckStatus Status { get; set; }
     [JsonPropertyName("kind")]
     public string Kind { get; set; } = "";
     [JsonPropertyName("item_ids")]
@@ -447,7 +447,7 @@ public sealed class Discrepancy
     [JsonPropertyName("notes")]
     public string Notes { get; set; } = "";
     [JsonPropertyName("status")]
-    public string Status { get; set; } = "open";
+    public DiscrepancyStatus Status { get; set; } = DiscrepancyStatus.Open;
     [JsonPropertyName("reported_by")]
     public string ReportedBy { get; set; } = "";
     [JsonPropertyName("reported_at")]

@@ -1,9 +1,26 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 
 namespace EmCoreInventory.Api.Data;
 
-public sealed partial class InventoryDbContext(DbContextOptions<InventoryDbContext> options) : DbContext(options)
+public sealed partial class InventoryDbContext(
+    DbContextOptions<InventoryDbContext> options, string serviceId = DatabaseStore.PrimaryServiceId) : DbContext(options)
 {
+    public string Schema { get; } = DatabaseStore.SchemaFor(serviceId);
+    internal (Guid TransactionId, string ServiceId)? ActiveCompanyLock { get; set; }
+    internal bool IsIdentity => Schema == DatabaseStore.PrimarySchema;
+
+    internal sealed class SchemaModelCacheKeyFactory : IModelCacheKeyFactory
+    {
+        public object Create(DbContext context, bool designTime) =>
+            context is InventoryDbContext inventory
+                ? (context.GetType(), inventory.Schema, designTime)
+                : (context.GetType(), designTime);
+    }
+
+    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder) =>
+        optionsBuilder.ReplaceService<IModelCacheKeyFactory, SchemaModelCacheKeyFactory>();
+
     public DbSet<InventoryBox> InventoryBoxes => Set<InventoryBox>();
     public DbSet<InventoryItem> InventoryItems => Set<InventoryItem>();
     public DbSet<InventoryEvent> InventoryEvents => Set<InventoryEvent>();
@@ -35,8 +52,15 @@ public sealed partial class InventoryDbContext(DbContextOptions<InventoryDbConte
     public DbSet<CompanyMigration> CompanyMigrations => Set<CompanyMigration>();
     public DbSet<CompanyTombstone> CompanyTombstones => Set<CompanyTombstone>();
 
+    internal static readonly Type[] IdentityEntityTypes =
+    [
+        typeof(Service), typeof(User), typeof(ServiceMembership), typeof(UserSession),
+        typeof(IdentityAudit), typeof(LoginAttempt), typeof(CompanyMigration), typeof(CompanyTombstone)
+    ];
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        modelBuilder.HasDefaultSchema(Schema);
         modelBuilder.Entity<InventoryBox>(entity =>
         {
             entity.ToTable("inventory_boxes");
@@ -63,7 +87,8 @@ public sealed partial class InventoryDbContext(DbContextOptions<InventoryDbConte
             entity.Property(row => row.Presentation).HasColumnName("presentation").IsRequired();
             entity.Property(row => row.VerifiedAt).HasColumnName("verified_at");
             entity.Property(row => row.Code).HasColumnName("code");
-            entity.Property(row => row.Status).HasColumnName("status").IsRequired().HasDefaultValue("available").ValueGeneratedNever();
+            entity.Property(row => row.Status).HasColumnName("status").IsRequired()
+                .HasConversion<StatusValueConverter<InventoryItemStatus>>().HasDefaultValue(InventoryItemStatus.Available).ValueGeneratedNever();
             entity.Property(row => row.ReceivedAt).HasColumnName("received_at");
             entity.Property(row => row.ExternalSource).HasColumnName("external_source");
             entity.Property(row => row.ExternalId).HasColumnName("external_id");
@@ -80,7 +105,7 @@ public sealed partial class InventoryDbContext(DbContextOptions<InventoryDbConte
         {
             entity.ToTable("inventory_events");
             entity.HasKey(row => row.Id);
-            entity.Property(row => row.Id).HasColumnName("id").ValueGeneratedOnAdd();
+            entity.Property(row => row.Id).HasColumnName("id").UseIdentityByDefaultColumn();
             entity.Property(row => row.ItemId).HasColumnName("item_id").IsRequired();
             entity.Property(row => row.Action).HasColumnName("action").IsRequired();
             entity.Property(row => row.FromBox).HasColumnName("from_box");
@@ -100,12 +125,13 @@ public sealed partial class InventoryDbContext(DbContextOptions<InventoryDbConte
         {
             entity.ToTable("incidents");
             entity.HasKey(row => row.Id);
-            entity.Property(row => row.Id).HasColumnName("id").ValueGeneratedOnAdd();
+            entity.Property(row => row.Id).HasColumnName("id").UseIdentityByDefaultColumn();
             entity.Property(row => row.IncidentNumber).HasColumnName("incident_number");
             entity.Property(row => row.Reason).HasColumnName("reason").IsRequired();
             entity.Property(row => row.Notes).HasColumnName("notes").IsRequired().HasDefaultValue("").ValueGeneratedNever();
             entity.Property(row => row.CreatedAt).HasColumnName("created_at").IsRequired();
-            entity.Property(row => row.Status).HasColumnName("status").IsRequired().HasDefaultValue("completed").ValueGeneratedNever();
+            entity.Property(row => row.Status).HasColumnName("status").IsRequired()
+                .HasConversion<StatusValueConverter<IncidentStatus>>().HasDefaultValue(IncidentStatus.Completed).ValueGeneratedNever();
             entity.Property(row => row.Revision).HasColumnName("revision").IsRequired().HasDefaultValue(1).ValueGeneratedNever();
             entity.Property(row => row.Payload).HasColumnName("payload");
             entity.Property(row => row.UpdatedAt).HasColumnName("updated_at");
@@ -123,7 +149,7 @@ public sealed partial class InventoryDbContext(DbContextOptions<InventoryDbConte
             entity.ToTable("medication_tags");
             entity.HasKey(row => row.Id);
             entity.Property(row => row.Id).HasColumnName("id");
-            entity.Property(row => row.Name).HasColumnName("name").IsRequired().UseCollation("NOCASE");
+            entity.Property(row => row.Name).HasColumnName("name").IsRequired();
             entity.Property(row => row.Requirements).HasColumnName("requirements").IsRequired();
         });
         modelBuilder.Entity<DrugDefinition>(entity =>
@@ -131,7 +157,7 @@ public sealed partial class InventoryDbContext(DbContextOptions<InventoryDbConte
             entity.ToTable("drug_definitions");
             entity.HasKey(row => row.Id);
             entity.Property(row => row.Id).HasColumnName("id");
-            entity.Property(row => row.Name).HasColumnName("name").IsRequired().UseCollation("NOCASE");
+            entity.Property(row => row.Name).HasColumnName("name").IsRequired();
             entity.Property(row => row.ConcentrationValue).HasColumnName("concentration_value").IsRequired();
             entity.Property(row => row.AmountUnit).HasColumnName("amount_unit").IsRequired();
             entity.Property(row => row.ConcentrationBasis).HasColumnName("concentration_basis").IsRequired();
@@ -164,7 +190,7 @@ public sealed partial class InventoryDbContext(DbContextOptions<InventoryDbConte
         {
             entity.ToTable("settings_events");
             entity.HasKey(row => row.Id);
-            entity.Property(row => row.Id).HasColumnName("id").ValueGeneratedOnAdd();
+            entity.Property(row => row.Id).HasColumnName("id").UseIdentityByDefaultColumn();
             entity.Property(row => row.EntityId).HasColumnName("entity_id").IsRequired();
             entity.Property(row => row.Action).HasColumnName("action").IsRequired();
             entity.Property(row => row.Details).HasColumnName("details").IsRequired();
@@ -193,7 +219,7 @@ public sealed partial class InventoryDbContext(DbContextOptions<InventoryDbConte
         {
             entity.ToTable("incident_versions");
             entity.HasKey(row => row.Id);
-            entity.Property(row => row.Id).HasColumnName("id").ValueGeneratedOnAdd();
+            entity.Property(row => row.Id).HasColumnName("id").UseIdentityByDefaultColumn();
             entity.Property(row => row.IncidentId).HasColumnName("incident_id").IsRequired();
             entity.Property(row => row.Revision).HasColumnName("revision").IsRequired();
             entity.Property(row => row.Status).HasColumnName("status").IsRequired();
@@ -206,7 +232,7 @@ public sealed partial class InventoryDbContext(DbContextOptions<InventoryDbConte
             entity.HasKey(row => row.Id);
             entity.Property(row => row.Id).HasColumnName("id");
             entity.Property(row => row.BoxId).HasColumnName("box_id").IsRequired();
-            entity.Property(row => row.Status).HasColumnName("status").IsRequired();
+            entity.Property(row => row.Status).HasColumnName("status").IsRequired().HasConversion<StatusValueConverter<DrugCheckStatus>>();
             entity.Property(row => row.Kind).HasColumnName("kind").IsRequired();
             entity.Property(row => row.ItemIds).HasColumnName("item_ids").IsRequired();
             entity.Property(row => row.CheckedIds).HasColumnName("checked_ids").IsRequired();
@@ -222,7 +248,7 @@ public sealed partial class InventoryDbContext(DbContextOptions<InventoryDbConte
             entity.ToTable("medication_classes");
             entity.HasKey(row => row.Id);
             entity.Property(row => row.Id).HasColumnName("id");
-            entity.Property(row => row.Name).HasColumnName("name").IsRequired().UseCollation("NOCASE");
+            entity.Property(row => row.Name).HasColumnName("name").IsRequired();
             entity.Property(row => row.Description).HasColumnName("description").IsRequired().HasDefaultValue("").ValueGeneratedNever();
         });
         modelBuilder.Entity<AccessProfile>(entity =>
@@ -244,7 +270,7 @@ public sealed partial class InventoryDbContext(DbContextOptions<InventoryDbConte
         {
             entity.ToTable("access_audit");
             entity.HasKey(row => row.Id);
-            entity.Property(row => row.Id).HasColumnName("id").ValueGeneratedOnAdd();
+            entity.Property(row => row.Id).HasColumnName("id").UseIdentityByDefaultColumn();
             entity.Property(row => row.ActorProfile).HasColumnName("actor_profile").IsRequired();
             entity.Property(row => row.Action).HasColumnName("action").IsRequired();
             entity.Property(row => row.Details).HasColumnName("details").IsRequired();
@@ -290,8 +316,8 @@ public sealed partial class InventoryDbContext(DbContextOptions<InventoryDbConte
             entity.ToTable("users");
             entity.HasKey(row => row.Id);
             entity.Property(row => row.Id).HasColumnName("id");
-            entity.Property(row => row.Username).HasColumnName("username").IsRequired().UseCollation("NOCASE");
-            entity.Property(row => row.Name).HasColumnName("name").IsRequired().UseCollation("NOCASE");
+            entity.Property(row => row.Username).HasColumnName("username").IsRequired();
+            entity.Property(row => row.Name).HasColumnName("name").IsRequired();
             entity.Property(row => row.PasswordHash).HasColumnName("password_hash").IsRequired();
             entity.Property(row => row.CreatedAt).HasColumnName("created_at").IsRequired();
             entity.Property(row => row.PlatformRole).HasColumnName("platform_role").IsRequired().HasDefaultValue("").ValueGeneratedNever();
@@ -319,7 +345,7 @@ public sealed partial class InventoryDbContext(DbContextOptions<InventoryDbConte
         {
             entity.ToTable("identity_audit");
             entity.HasKey(row => row.Id);
-            entity.Property(row => row.Id).HasColumnName("id").ValueGeneratedOnAdd();
+            entity.Property(row => row.Id).HasColumnName("id").UseIdentityByDefaultColumn();
             entity.Property(row => row.ServiceId).HasColumnName("service_id");
             entity.Property(row => row.ActorId).HasColumnName("actor_id");
             entity.Property(row => row.Actor).HasColumnName("actor").IsRequired();
@@ -343,7 +369,8 @@ public sealed partial class InventoryDbContext(DbContextOptions<InventoryDbConte
             entity.Property(row => row.BoxId).HasColumnName("box_id").IsRequired();
             entity.Property(row => row.ItemId).HasColumnName("item_id");
             entity.Property(row => row.Notes).HasColumnName("notes").IsRequired();
-            entity.Property(row => row.Status).HasColumnName("status").IsRequired().HasDefaultValue("open").ValueGeneratedNever();
+            entity.Property(row => row.Status).HasColumnName("status").IsRequired()
+                .HasConversion<StatusValueConverter<DiscrepancyStatus>>().HasDefaultValue(DiscrepancyStatus.Open).ValueGeneratedNever();
             entity.Property(row => row.ReportedBy).HasColumnName("reported_by").IsRequired();
             entity.Property(row => row.ReportedAt).HasColumnName("reported_at").IsRequired();
             entity.Property(row => row.ApprovedBy).HasColumnName("approved_by");
@@ -366,6 +393,11 @@ public sealed partial class InventoryDbContext(DbContextOptions<InventoryDbConte
             entity.Property(row => row.DeletedAt).HasColumnName("deleted_at").IsRequired();
             entity.Property(row => row.ActorId).HasColumnName("actor_id").IsRequired();
         });
-        ConfigureConstraints(modelBuilder);
+        ConfigureConstraints(modelBuilder, IsIdentity);
+        if (!IsIdentity)
+        {
+            foreach (var entityType in IdentityEntityTypes)
+                modelBuilder.Ignore(entityType);
+        }
     }
 }

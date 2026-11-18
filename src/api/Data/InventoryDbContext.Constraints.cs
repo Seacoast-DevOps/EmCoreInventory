@@ -6,16 +6,24 @@ namespace EmCoreInventory.Api.Data;
 
 public sealed partial class InventoryDbContext
 {
-    private static void ConfigureConstraints(ModelBuilder model)
+    private static void ConfigureConstraints(ModelBuilder model, bool identity)
     {
-        model.Entity<InventoryItem>().ToTable("inventory_items", table => table.UseSqlReturningClause(false));
+        model.Entity<InventoryItem>().ToTable("inventory_items", table =>
+        {
+            table.HasCheckConstraint("ck_inventory_items_tracking_code", "code IS NULL OR code ~ '^[A-Z0-9]{8}$'");
+            table.HasCheckConstraint("ck_inventory_items_status", "status IN ('available', 'opened', 'unassigned', 'used', 'disposed')");
+        });
+        model.Entity<Incident>().ToTable("incidents", table =>
+            table.HasCheckConstraint("ck_incidents_status", "status IN ('completed', 'draft', 'reopened')"));
+        model.Entity<DrugCheck>().ToTable("drug_checks", table =>
+            table.HasCheckConstraint("ck_drug_checks_status", "status IN ('draft', 'complete', 'superseded')"));
+        model.Entity<Discrepancy>().ToTable("discrepancies", table =>
+            table.HasCheckConstraint("ck_discrepancies_status", "status IN ('open', 'approved')"));
+        model.Entity<TrackingCode>().ToTable("tracking_codes", table =>
+            table.HasCheckConstraint("ck_tracking_codes_code", "code ~ '^[A-Z0-9]{8}$'"));
         model.Entity<InventoryItem>().HasIndex(row => row.Code).IsUnique();
         model.Entity<InventoryItem>().HasIndex(row => new { row.ExternalSource, row.ExternalId }).IsUnique();
         model.Entity<TrackingCode>().HasIndex(row => row.ItemId).IsUnique();
-        model.Entity<User>().HasIndex(row => row.Username).IsUnique();
-        model.Entity<MedicationTag>().HasIndex(row => row.Name).IsUnique();
-        model.Entity<MedicationClass>().HasIndex(row => row.Name).IsUnique();
-        model.Entity<DrugDefinition>().HasIndex(row => new { row.Name, row.ConcentrationValue, row.AmountUnit, row.ConcentrationBasis, row.MaxAmount, row.Form }).IsUnique();
         model.Entity<Incident>().HasIndex(row => row.ClientKey).IsUnique();
         model.Entity<DrugCheck>().HasIndex(row => row.BoxId).IsUnique().HasFilter("status = 'draft'");
         model.Entity<Incident>().Property(row => row.Revision).IsConcurrencyToken();
@@ -40,10 +48,19 @@ public sealed partial class InventoryDbContext
         model.Entity<DrugCheck>().HasOne<InventoryBox>().WithMany().HasForeignKey(row => row.BoxId).OnDelete(DeleteBehavior.Restrict);
         model.Entity<Discrepancy>().HasOne<InventoryBox>().WithMany().HasForeignKey(row => row.BoxId).OnDelete(DeleteBehavior.Restrict);
         model.Entity<Discrepancy>().HasOne<InventoryItem>().WithMany().HasForeignKey(row => row.ItemId).OnDelete(DeleteBehavior.Restrict);
-        model.Entity<ServiceMembership>().HasOne<User>().WithMany().HasForeignKey(row => row.UserId).OnDelete(DeleteBehavior.Restrict);
-        model.Entity<ServiceMembership>().HasOne<Service>().WithMany().HasForeignKey(row => row.ServiceId).OnDelete(DeleteBehavior.Restrict);
-        model.Entity<UserSession>().HasOne<User>().WithMany().HasForeignKey(row => row.UserId).OnDelete(DeleteBehavior.Restrict);
-        model.Entity<UserSession>().HasOne<Service>().WithMany().HasForeignKey(row => row.ServiceId).OnDelete(DeleteBehavior.Restrict);
+        if (identity)
+        {
+            // A single canonical service ID must own each UUID-derived PostgreSQL schema.
+            model.Entity<Service>().ToTable("services", table =>
+                table.HasCheckConstraint("ck_services_canonical_id",
+                    "id IN ('primary', 'platform') OR id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'"));
+            model.Entity<UserSession>().HasIndex(row => row.ExpiresAt);
+            model.Entity<IdentityAudit>().HasIndex(row => new { row.ServiceId, row.Id });
+            model.Entity<ServiceMembership>().HasOne<User>().WithMany().HasForeignKey(row => row.UserId).OnDelete(DeleteBehavior.Restrict);
+            model.Entity<ServiceMembership>().HasOne<Service>().WithMany().HasForeignKey(row => row.ServiceId).OnDelete(DeleteBehavior.Restrict);
+            model.Entity<UserSession>().HasOne<User>().WithMany().HasForeignKey(row => row.UserId).OnDelete(DeleteBehavior.Restrict);
+            model.Entity<UserSession>().HasOne<Service>().WithMany().HasForeignKey(row => row.ServiceId).OnDelete(DeleteBehavior.Restrict);
+        }
     }
 
     private void ValidateChanges()

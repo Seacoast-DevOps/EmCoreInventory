@@ -1,8 +1,9 @@
 using System.Globalization;
 using System.Security.Cryptography;
-using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using EmCoreInventory.Api.Authorization;
 using EmCoreInventory.Api.Catalog;
+using EmCoreInventory.Api.Common;
 using EmCoreInventory.Api.Data;
 using static EmCoreInventory.Api.Inventory.InventoryJson;
 
@@ -10,73 +11,114 @@ namespace EmCoreInventory.Api.Inventory;
 
 internal sealed partial class InventoryOperation
 {
-    internal void Receive()
+    internal void Receive(ReceiveRequest request)
     {
-        var definition = db.DrugDefinitions.Find(body.Text("definitionId"));
-        Require(definition is not null, "Choose a standardized drug from Manage Par Levels");
-        var quantity = body.Integer("quantity");
-        Require(quantity is >= 1 and <= 1000, "Quantity must be a whole number from 1 to 1000");
-        Require(!body.ContainsKey("replacement") || body.IsBoolean("replacement"), "Replacement must be true or false");
-        Require(!body.ContainsKey("codeMode") || body.Text("codeMode") is "manual" or "auto", "Choose manual or generated codes");
-        var codes = new List<string>();
-        if (body.Text("codeMode") == "manual")
+        AccessService.Authorize(access, "stock.create");
+        var destination = request.BoxId ?? "unassigned";
+        if (destination != "unassigned") AccessService.Authorize(access, "inventory.transfer");
+        var box = AccessService.AuthorizeStorage(db, access, destination);
+        var definition = db.DrugDefinitions.Find(request.DefinitionId)
+            ?? throw new ApiException(400, "Choose a standardized drug from Manage Par Levels");
+        AccessService.AuthorizeMedication(access, definition, "view");
+        AccessService.AuthorizeMedication(access, definition, "create");
+
+        Require(request.Quantity is >= 1 and <= 1000, "Quantity must be a whole number from 1 to 1000");
+        var codes = ReceiptCodes(request);
+        var lot = request.LotNumber?.Trim();
+        var expiration = request.ExpirationDate?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        string? batchId = null;
+        if (request.BatchCreate == true || !string.IsNullOrEmpty(lot) || expiration is not null)
         {
-            Require(body["codes"] is JsonArray a && a.Count == quantity, "Enter one code for each item");
-            foreach (var node in (JsonArray)body["codes"]!) codes.Add(node is JsonValue v && v.TryGetValue<string>(out var code) ? code.Trim().ToUpperInvariant() : "");
-            Require(codes.All(x => Regex.IsMatch(x, "^[A-Z0-9]{8}$")) && codes.Distinct().Count() == codes.Count, "Each code must be a different eight-character alphanumeric code");
-            Require(!db.TrackingCodes.Any(x => codes.Contains(x.Code)), "That tracking code has been used before. It cannot be reused.", 409);
+            Require(lot is { Length: > 0 and <= 80 } && expiration is not null, "Enter a lot number and a valid expiration date for the batch");
+            batchId = Guid.NewGuid().ToString();
+            db.InventoryBatches.Add(new InventoryBatch
+            {
+                Id = batchId, DefinitionId = definition.Id, LotNumber = lot!, ExpiresOn = expiration!,
+                Quantity = request.Quantity, CreatedAt = now
+            });
         }
-        Require(!body.ContainsKey("lotNumber") || body.OptionalText("lotNumber") is not null, "Enter a valid lot number");
-        Require(!body.ContainsKey("batchCreate") || body.IsBoolean("batchCreate"), "Batch creation must be true or false");
-        var lot = body.Text("lotNumber").Trim();
-        var expiration = body.Text("expirationDate");
-        if (body.Boolean("batchCreate") || lot.Length > 0 || expiration.Length > 0)
-            Require(lot.Length is > 0 and <= 80 && DateOnly.TryParseExact(expiration, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _), "Enter a lot number and a valid expiration date for the batch");
-        var batchId = lot.Length > 0 ? Guid.NewGuid().ToString() : null;
-        if (batchId is not null) db.InventoryBatches.Add(new InventoryBatch { Id = batchId, DefinitionId = definition!.Id, LotNumber = lot, ExpiresOn = expiration, Quantity = quantity, CreatedAt = now });
-        var box = Box(body.Text("boxId", "unassigned"));
-        RequireWitness(Requirements(definition!.Id), body.Boolean("replacement") ? "replacement" : "");
+
+        var replacement = request.Replacement == true;
+        if (replacement) RequireWitness(Requirements(definition.Id), "replacement");
         BreakSeals([box]);
         var snapshot = CatalogService.DefinitionSnapshot(definition);
         snapshot["hasStock"] = db.InventoryItems.Any(item => item.DefinitionId == definition.Id);
         snapshot["tagIds"] = Array(db.DefinitionTags.Where(link => link.DefinitionId == definition.Id).Select(link => link.TagId).ToList());
-        var generatedCodes = new HashSet<string>();
-        var presentation = $"{definition.ConcentrationValue.ToString(CultureInfo.InvariantCulture)} {definition.AmountUnit}/{definition.ConcentrationBasis} · {definition.MaxAmount.ToString(CultureInfo.InvariantCulture)} {definition.AmountUnit} per {definition.Form.ToLowerInvariant()}";
-        for (var i = 0; i < quantity; i++)
+        var snapshotJson = snapshot.ToJsonString();
+        var presentation = FormattableString.Invariant($"{definition.ConcentrationValue} {definition.AmountUnit}/{definition.ConcentrationBasis} · {definition.MaxAmount} {definition.AmountUnit} per {definition.Form.ToLowerInvariant()}");
+        foreach (var code in codes)
         {
-            string code;
-            if (codes.Count > 0) code = codes[i];
-            else do { code = string.Concat(Enumerable.Range(0, 8).Select(_ => "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[RandomNumberGenerator.GetInt32(36)])); } while (generatedCodes.Contains(code) || db.TrackingCodes.Any(x => x.Code == code));
-            generatedCodes.Add(code);
-            var item = new InventoryItem { Id = Guid.NewGuid().ToString(), BoxId = box.Id, Medication = definition.Name, Presentation = presentation, Code = code, Status = box.Id == "unassigned" ? "unassigned" : "available", ReceivedAt = now, DefinitionId = definition.Id, DefinitionSnapshot = snapshot.ToJsonString(), AmountTotal = definition.MaxAmount, RemainingAmount = definition.MaxAmount, BatchId = batchId, LotNumber = lot.Length > 0 ? lot : null, ExpiresOn = expiration.Length > 0 ? expiration : null };
+            var item = new InventoryItem
+            {
+                Id = Guid.NewGuid().ToString(), BoxId = box.Id, Medication = definition.Name, Presentation = presentation,
+                Code = code, Status = destination == "unassigned" ? InventoryItemStatus.Unassigned : InventoryItemStatus.Available,
+                ReceivedAt = now, DefinitionId = definition.Id, DefinitionSnapshot = snapshotJson, AmountTotal = definition.MaxAmount,
+                RemainingAmount = definition.MaxAmount, BatchId = batchId, LotNumber = batchId is null ? null : lot, ExpiresOn = expiration
+            };
             db.InventoryItems.Add(item);
-            db.SaveChanges();
-            if (!db.TrackingCodes.Any(x => x.Code == code)) db.TrackingCodes.Add(new TrackingCode { Code = code, ItemId = item.Id, IssuedAt = now });
-            Event(item.Id, "received", null, box.Id, new { code, definition = snapshot, batchId, lotNumber = item.LotNumber, expirationDate = item.ExpiresOn, replacement = body.Boolean("replacement"), witness = body.OptionalText("witness") });
+            db.TrackingCodes.Add(new TrackingCode { Code = code, ItemId = item.Id, IssuedAt = now });
+            Event(item.Id, "received", null, box.Id, new
+            {
+                code, definition = snapshot, batchId, lotNumber = item.LotNumber, expirationDate = expiration, replacement,
+                witness = body.OptionalText("witness")
+            });
         }
         box.StockRevision++;
     }
-    internal void Verify()
+
+    private string[] ReceiptCodes(ReceiveRequest request)
     {
-        var item = Item(body.Text("itemId"));
-        Require(item.BoxId != "unassigned", "Assign this item to a container before checking it");
-        Require(body.IsBoolean("verified"), "Verification must be true or false");
-        item.VerifiedAt = body.Boolean("verified") ? now : null;
-        Event(item.Id, "verify", item.BoxId, item.BoxId, new { verified = body.Boolean("verified") });
+        if (request.CodeMode == CodeMode.Manual)
+        {
+            var supplied = request.Codes?.Select(code => code?.Trim().ToUpperInvariant() ?? "").ToArray() ?? [];
+            Require(supplied.Length == request.Quantity, "Enter one code for each item");
+            Require(supplied.All(code => Regex.IsMatch(code, @"\A[A-Z0-9]{8}\z")) && supplied.Distinct().Count() == supplied.Length,
+                "Each code must be a different eight-character alphanumeric code");
+            Require(!db.TrackingCodes.Any(row => supplied.Contains(row.Code)), "That tracking code has been used before. It cannot be reused.", 409);
+            return supplied;
+        }
+
+        var generated = new HashSet<string>(StringComparer.Ordinal);
+        do
+        {
+            while (generated.Count < request.Quantity)
+                generated.Add(RandomNumberGenerator.GetString("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", 8));
+            var candidates = generated.ToArray();
+            generated.ExceptWith(db.TrackingCodes.Where(row => candidates.Contains(row.Code)).Select(row => row.Code).ToList());
+        } while (generated.Count < request.Quantity);
+        return generated.ToArray();
     }
-    internal void Move()
+
+    internal void Verify(VerifyRequest request)
     {
-        var item = Item(body.Text("itemId"));
-        Require(body.Text("sourceId") == item.BoxId, "The item location changed. Refresh inventory and try again.", 409);
-        var destination = Box(body.Text("destinationId"));
+        AccessService.Authorize(access, "inventory.view");
+        AccessService.Authorize(access, "checks.verify");
+        var item = Item(request.ItemId);
+        AuthorizeDrug(item, "check");
+        Require(item.BoxId != "unassigned", "Assign this item to a container before checking it");
+        item.VerifiedAt = request.Verified ? now : null;
+        Event(item.Id, "verify", item.BoxId, item.BoxId, new { verified = request.Verified });
+    }
+
+    internal void Move(MoveRequest request)
+    {
+        AccessService.Authorize(access, "inventory.view");
+        AccessService.Authorize(access, "inventory.transfer");
+        var destination = AccessService.AuthorizeStorage(db, access, request.DestinationId);
+        var item = Item(request.ItemId);
+        AuthorizeDrug(item, "transfer");
+        Require(request.SourceId == item.BoxId, "The item location changed. Refresh inventory and try again.", 409);
         Require(destination.Id != item.BoxId, "Choose a different container. An item cannot move within the same container.");
         var source = Box(item.BoxId);
         RequireWitness(Requirements(item.DefinitionId), "transfer");
         BreakSeals([source, destination]);
         item.BoxId = destination.Id;
-        item.Status = destination.Id == "unassigned" ? "unassigned" : item.Status == "unassigned" ? item.WasOpened != 0 || item.RemainingAmount < item.AmountTotal ? "opened" : "available" : item.Status;
+        if (destination.Id == "unassigned") item.Status = InventoryItemStatus.Unassigned;
+        else if (item.Status == InventoryItemStatus.Unassigned)
+            item.Status = item.WasOpened != 0 || item.RemainingAmount < item.AmountTotal ? InventoryItemStatus.Opened : InventoryItemStatus.Available;
         item.VerifiedAt = null;
-        source.StockRevision++; destination.StockRevision++;
+        source.StockRevision++;
+        destination.StockRevision++;
         Event(item.Id, "move", source.Id, destination.Id, new { witness = body.OptionalText("witness") });
     }
 }

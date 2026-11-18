@@ -7,17 +7,14 @@
     "src/web"
   ],
   "scripts": {
-    "dev": "concurrently -k \"npm run dev:server\" \"npm run dev:client\"",
+    "dev": "node scripts/dev.js",
     "dev:client": "npm run dev --workspace @emcore/web",
-    "dev:server": "dotnet watch --project src/api/EmCoreInventory.Api.csproj run --no-launch-profile --urls http://127.0.0.1:3001",
+    "dev:server": "node scripts/dev.js --server-only",
     "build": "npm run build:client && npm run build:server",
     "build:client": "npm run build --workspace @emcore/web",
     "build:server": "dotnet build src/api/EmCoreInventory.Api.csproj",
     "lint": "npm run lint --workspace @emcore/web",
     "preview": "npm run preview --workspace @emcore/web"
-  },
-  "devDependencies": {
-    "concurrently": "*"
   },
   "allowScripts": {
     "fsevents@2.3.3": true

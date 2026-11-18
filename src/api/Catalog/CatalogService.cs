@@ -27,13 +27,13 @@ public static class CatalogService
         ["form"] = drug.Form
     };
 
-    public static JsonObject Snapshot(InventoryDbContext db, AccessContext? context = null)
+    internal static JsonObject Snapshot(InventoryDbContext db, AccessContext context, IReadOnlySet<string> visibleParBoxIds)
     {
         var tags = db.MedicationTags.OrderBy(row => row.Name).AsNoTracking().ToList();
         var links = db.DefinitionTags.AsNoTracking().ToList();
         var stocked = db.InventoryItems.Select(row => row.DefinitionId).Distinct().ToHashSet();
         var definitions = db.DrugDefinitions.OrderBy(row => row.Name).ThenBy(row => row.ConcentrationValue).AsNoTracking().ToList();
-        var visible = definitions.Where(drug => context == null || context.Permissions.GetValueOrDefault("definitions.view") || MedicationVisible(context, drug)).ToList();
+        var visible = definitions.Where(drug => context.Permissions.GetValueOrDefault("definitions.view") || MedicationVisible(context, drug)).ToList();
         var visibleIds = visible.Select(row => row.Id).ToHashSet();
         return new JsonObject
         {
@@ -45,7 +45,7 @@ public static class CatalogService
                 value["tagIds"] = JsonSerializer.SerializeToNode(links.Where(link => link.DefinitionId == drug.Id).Select(link => link.TagId));
                 return (JsonNode)value;
             }).ToArray()),
-            ["parLevels"] = JsonSerializer.SerializeToNode(db.ParLevels.AsNoTracking().ToList().Where(row => visibleIds.Contains(row.DefinitionId)).Select(row => new { definitionId = row.DefinitionId, boxId = row.BoxId, target = row.Target }))
+            ["parLevels"] = JsonSerializer.SerializeToNode(db.ParLevels.AsNoTracking().ToList().Where(row => visibleIds.Contains(row.DefinitionId) && visibleParBoxIds.Contains(row.BoxId)).Select(row => new { definitionId = row.DefinitionId, boxId = row.BoxId, target = row.Target }))
         };
     }
 
@@ -64,21 +64,38 @@ public static class CatalogService
 
     public static string Label(DrugDefinition drug) => $"{drug.Name} — {drug.ConcentrationValue:G} {drug.AmountUnit}/{drug.ConcentrationBasis} · {drug.MaxAmount:G} {drug.AmountUnit} per {drug.Form.ToLowerInvariant()}";
 
-    public static void Save(InventoryDbContext db, string path, JsonObject body, string now, AccessContext context)
+    internal static void SaveTag(InventoryDbContext db, AccessContext context, JsonObject body, string now)
+    {
+        AccessService.Authorize(context, "tags.edit");
+        var (id, name, existing) = SettingsIdentity(body);
+        SaveTag(db, body, id, name, existing);
+        AuditSetting(db, context, body, now, id, "tag_saved");
+    }
+
+    internal static void SaveDefinition(InventoryDbContext db, AccessContext context, JsonObject body, string now)
+    {
+        AccessService.Authorize(context, body.ContainsKey("id") ? "definitions.edit" : "definitions.create");
+        var (id, name, existing) = SettingsIdentity(body);
+        SaveDefinition(db, body, id, name, existing);
+        AuditSetting(db, context, body, now, id, "definition_saved");
+    }
+
+    private static (string Id, string Name, bool Existing) SettingsIdentity(JsonObject body)
     {
         var suppliedId = String(body, "id");
         if (body.ContainsKey("id") && (suppliedId == null || suppliedId.Length > 80)) throw new ApiException(400, "Invalid settings ID");
-        var id = suppliedId ?? Guid.NewGuid().ToString();
         var name = String(body, "name")?.Trim();
         if (string.IsNullOrEmpty(name) || name.Length > 100) throw new ApiException(400, "Enter a name of 1 to 100 characters");
-        if (path == "/api/tags") SaveTag(db, body, id, name, suppliedId != null);
-        else SaveDefinition(db, body, id, name, suppliedId != null);
+        return (suppliedId ?? Guid.NewGuid().ToString(), name, suppliedId != null);
+    }
+
+    private static void AuditSetting(InventoryDbContext db, AccessContext context, JsonObject body, string now, string id, string action)
+    {
         db.SettingsEvents.Add(new SettingsEvent
         {
-            EntityId = id, Action = path == "/api/tags" ? "tag_saved" : "definition_saved",
-            Details = body.ToJsonString(), CreatedAt = now, ActorProfile = context.User.Actor, ActorUserId = context.User.Id
+            EntityId = id, Action = action, Details = body.ToJsonString(),
+            CreatedAt = now, ActorProfile = context.User.Actor, ActorUserId = context.User.Id
         });
-        db.SaveChanges();
     }
 
     private static void SaveTag(InventoryDbContext db, JsonObject body, string id, string name, bool existing)

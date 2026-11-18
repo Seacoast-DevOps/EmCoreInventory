@@ -1,22 +1,31 @@
 # EMCore - Inventory
 
-Mobile-first React / Vite application using Bootstrap 6.0.0-alpha.1, Lucide icons, and a local Node/SQLite API.
+Mobile-first React / Vite application using Bootstrap 6.0.0-alpha.1, Lucide icons, and an ASP.NET Core API backed by Entity Framework Core and PostgreSQL.
 
 ## Documentation
 
 [User guide and technical reference](docs/EMCore-Inventory-Documentation.html)
 
-A single self-contained HTML page with searchable user help, illustrated workflows, local interactive examples, implementation details, API requests, and the generated SQLite schema. Download the file and open it in a browser; GitHub normally shows HTML source rather than running the page. Styles, scripts, and example screenshots are embedded. Print / PDF prints both guides and expands the schema.
+A self-contained HTML page with searchable user help, illustrated workflows, interactive examples, and API and data-model references. Download the file and open it in a browser. Styles, scripts, and example screenshots are embedded. Print / PDF includes both guides.
 
 ## Run
 
-Requires Node.js 24.14+.
+The web client uses Node.js 24.14+. The API targets .NET 11 and requires a dedicated PostgreSQL database. Grant its login CONNECT and CREATE on that database so the API can create and maintain its schemas.
 
-1. npm install
-2. npm run dev
-3. Open http://localhost:5173 (or the URL Vite prints).
+For local development, copy `.env.example` to `.env` and fill in `ConnectionStrings__emcore` with your PostgreSQL connection details. Git ignores `.env`. Both `npm run dev` and `npm run dev:server` load it for the API.
 
-SQLite is stored at server/data/inventory.sqlite and ignored by Git. The API binds to 127.0.0.1:3001. Vite proxies /api.
+```sh
+npm install
+npm run dev
+```
+
+Open the address printed by Vite. It proxies `/api` to the API on `127.0.0.1:3001`.
+
+## Database isolation and locking
+
+The API resolves the selected company from the authenticated session. Users, memberships, sessions, and primary-company stock live in `emcore_primary`. Each additional company uses a schema derived from its UUID. Company, storage, and medication permissions are enforced by the API.
+
+Inventory writes lock the company's row in `emcore_primary.services` with `SELECT ... FOR UPDATE`, recheck the session, and hold the lock through the inventory and audit commit. Inventory reads take a shared lock on the same row so concurrent readers can use the same company while its permissions and stock stay consistent for the request. Writers for the same company take turns across API instances. Writers for different companies can proceed concurrently. Incident, check, and discrepancy revisions still detect stale browser submissions.
 
 ## Home and settings
 
@@ -37,7 +46,7 @@ https://www.maine.gov/ems/sites/maine.gov.ems/files/inline-files/2025-MEMS-Formu
 
 The source is linked on seeded profile forms. Midazolam lists alternate supplied concentrations; this starter uses 5 mg/mL in a 1 mL vial and records that selection. Fentanyl uses 100 mcg/2 mL and ketamine 100 mg/mL in 5 mL. These are stocking defaults from the referenced formulary, not patient dose limits or confirmation of a physical vial label. Original requested container quantities are retained, including aspirin 324 mg packs and norepinephrine 8 mg in 250 mL premixed bags. The user's existing Dextrose 10%, 250 mL bag is also preserved and standardized.
 
-The schema migrations run once where appropriate and do not duplicate stock on restart. A database backup was made before the workflow migration.
+The API records seed versions to avoid duplicating starter stock on restart.
 
 ## Codes and receiving stock
 
@@ -47,7 +56,7 @@ The tracking_codes registry is permanent and immutable. Used and disposed items 
 
 ## Drug checks
 
-Containers start collapsed and only one opens at a time. Start a check, verify items, and Save draft to resume it later. Every verification is saved to SQLite immediately. Draft notes and progress survive reload and navigation.
+Containers start collapsed and only one opens at a time. Start a check, verify items, and Save draft to resume it later. Every verification is saved to PostgreSQL immediately. Draft notes and progress survive reload and navigation.
 
 Complete check requires every current item to be verified. Completed checks hide by default; Show completed checks brings them back with a checkmark. Reset check and Ad hoc check start a new session without deleting previous records. Check history lists saved, completed, and superseded sessions.
 
@@ -59,7 +68,7 @@ Select one or more items across storage areas. Search is scoped to the selected 
 
 Save draft persists an unfinished incident without changing stock or opening seals. Saved incidents are searchable and can be reopened. Completed incidents are read-only until explicitly reopened. A correction reason is required for resaving a reopened incident. The server applies only the difference from the incident's previous allocation, preserves all earlier versions, and prevents over-allocation if another incident has since used the vial. Reopening alone changes no stock. Older whole-item incident records are migrated to versioned allocations.
 
-Optimistic revisions reject stale edits. A client key prevents a retry of new-incident creation from duplicating it. Browser-local editor state is a convenience; saved incident records and check sessions live in SQLite.
+Optimistic revisions reject stale edits. A client key prevents a retry of new-incident creation from duplicating it. Browser-local editor state is a convenience; saved incident records and check sessions live in PostgreSQL.
 
 ## Witnesses and seals
 
@@ -89,11 +98,10 @@ Seal conflicts return HTTP 409 with sealedBoxes. Retry only after physical confi
 
 ## Verify
 
-- npm run build
-- npm run lint
-- node --test server/inventory.test.js server/features.test.js server/catalog.test.js server/workflows.test.js server/access.test.js server/auth.test.js server/witness-qr.test.js
-
-Tests use isolated in-memory databases. Browser trials also use a separate in-memory instance, leaving the main inventory untouched by test receipts, incidents, and checks. Production migrations preserve the preexisting stock and codes.
+```sh
+npm run build
+npm run lint
+```
 
 Import UI remains a future feature. New witness signoffs use authenticated user accounts; old name-only entries are retained and labelled legacy.
 
@@ -111,11 +119,11 @@ The top-right dropdown selects among services the signed-in user belongs to. The
 
 On first launch, enter your service name and create the first Service Admin at http://localhost:5173. No default username/password is installed. Existing stock, histories and tracking codes remain in the primary service. Sign in on later visits.
 
-Service Admins use Home → Users to create accounts, set/reset passwords, assign roles/capability tags, and activate/deactivate users in the active service. At least one active Service Admin must remain. Username uniqueness is application-wide. Roles and permissions are read from SQLite on every request, so changes take effect for existing sessions. Deactivation/password reset revokes all that user's sessions. My Account lets a user change their own password and revokes other sessions.
+Service Admins use Home → Users to create accounts, set/reset passwords, assign roles/capability tags, and activate/deactivate users in the active service. At least one active Service Admin must remain. Username uniqueness is application-wide. Company admins manage memberships in their selected company. Changing the global profile or password of an account shared across companies requires a platform admin. Roles and permissions are read from PostgreSQL on every request, so changes take effect for existing sessions. Deactivation/password reset revokes all that user's sessions. My Account lets a user change their own password and revokes other sessions.
 
-Passwords use salted scrypt hashes. Sessions use random opaque tokens, stored hashed in SQLite, with an eight-hour absolute lifetime; cookies are HttpOnly and SameSite=Strict. Passwords and session tokens are excluded from application audit details. Repeated failed logins are throttled for 15 minutes after five failures per remote-address/username combination. JSON writes reject foreign Origin headers. X-EMCore-Profile no longer selects identity or grants access.
+Passwords use salted scrypt hashes. Sessions use random opaque tokens, stored hashed in PostgreSQL, with an eight-hour absolute lifetime; cookies are HttpOnly and SameSite=Strict. Passwords and session tokens are excluded from application audit details. Repeated failed logins are throttled for 15 minutes after five failures per remote-address/username combination. JSON writes reject foreign Origin headers. X-EMCore-Profile no longer selects identity or grants access.
 
-Home → Services / DEA creates and edits services. A new service grants its creator Service Admin membership and starts with empty stock and starter catalog/container templates. Each additional service persists its inventory, definitions, checks, incidents, policies, and medication histories in server/data/service-<UUID>.sqlite; identity, memberships, service details, and sessions remain in inventory.sqlite. Back up all these SQLite files together while the app is stopped. Users created under a service belong to that service. Service selection is restricted to active memberships.
+Home → Services / DEA creates and edits services. A new service grants its creator Service Admin membership and starts with empty stock and starter catalog/container templates. Each additional service has a separate inventory schema in the same PostgreSQL database. The identity store holds users, memberships, service details, and sessions. Include all application schemas in database backups. Users created under a service belong to that service. Service selection is restricted to active memberships.
 
 Service details include DEA registrant name, registration number, expiration date, schedules, registered address, contacts, and notes. DEA information is visible/editable only to an active Service Admin for the selected service. Number format/date checks do not verify registration with the DEA. Audit entries record changed field names rather than copying DEA/contact details.
 
@@ -148,10 +156,8 @@ Inventory item QR buttons and Item record → Generate / show QR label generate 
 
 Routes: GET /api/qr?item=<code-or-id>, GET /api/qr/image?item=<code-or-id>, and GET /api/qr/resolve?value=<encoded-QR-or-code>. All require authenticated records.view and medication view access.
 
-QR implementation uses the maintained APIs documented by [node-qrcode](https://github.com/soldair/node-qrcode) and [QR Scanner](https://github.com/nimiq/qr-scanner).
+QR implementation uses the maintained APIs documented by [QRCoder](https://github.com/codebude/QRCoder) and [QR Scanner](https://github.com/nimiq/qr-scanner).
 
 ## Role and license matrix
 
 See [Permissions reference](docs/EMCore-Permissions-Reference.html) for the current seven-role matrix, clinical-license restrictions, company lifecycle, storage access, Driver partner verification, and discrepancy approval. This supersedes earlier Service Admin and seal-witness descriptions.
-
-Run `node --test server/*.test.js`, `npm run build`, and `npm run lint` to validate.
